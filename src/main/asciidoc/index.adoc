@@ -415,13 +415,11 @@ include::override/verticles.adoc[]
 
 === Verticle Types
 
-There are three different types of verticles:
+There are two different types of verticles:
 
 Standard Verticles:: These are the most common and useful type - they are always executed using an event loop thread.
 We'll discuss this more in the next section.
 Worker Verticles:: These run using a thread from the worker pool. An instance is never executed concurrently by more
-than one thread.
-Multi-threaded worker verticles:: These run using a thread from the worker pool. An instance can be executed concurrently by more
 than one thread.
 
 === Standard verticles
@@ -553,39 +551,6 @@ This is useful for scaling easily across multiple cores. For example you might h
 and multiple cores on your machine, so you want to deploy multiple instances to utilise all the cores.
 
 include::override/verticle-configuration.adoc[]
-
-=== Verticle Isolation Groups
-
-By default, Vert.x has a _flat classpath_. I.e, when Vert.x deploys verticles it does so with the current classloader -
-it doesn't create a new one. In the majority of cases this is the simplest, clearest, and sanest thing to do.
-
-However, in some cases you may want to deploy a verticle so the classes of that verticle are isolated from others in
-your application.
-
-This might be the case, for example, if you want to deploy two different versions of a verticle with the same class name
-in the same Vert.x instance, or if you have two different verticles which use different versions of the same jar library.
-
-When using an isolation group you provide a list of the class names that you want isolated using
-{@link io.vertx.core.DeploymentOptions#setIsolatedClasses(java.util.List)}-  an entry can be a fully qualified
-classname such as `com.mycompany.myproject.engine.MyClass` or it can be a wildcard which will match any classes in a package and any
-sub-packages, e.g. `com.mycompany.myproject.*` would match any classes in the package `com.mycompany.myproject` or
-any sub-packages.
-
-Please note that _only_ the classes that match will be isolated - any other classes will be loaded by the current
-class loader.
-
-Extra classpath entries can also be provided with {@link io.vertx.core.DeploymentOptions#setExtraClasspath} so if
-you want to load classes or resources that aren't already present on the main classpath you can add this.
-
-WARNING: Use this feature with caution. Class-loaders can be a can of worms, and can make debugging difficult, amongst
-other things.
-
-Here's an example of using an isolation group to isolate a verticle deployment.
-
-[source,$lang]
-----
-{@link examples.CoreExamples#example14}
-----
 
 === High Availability
 
@@ -809,45 +774,6 @@ order to gather metrics. For more information on this, please consult the
 
 You can also specify a metrics factory programmatically if embedding Vert.x using
 {@link io.vertx.core.metrics.MetricsOptions#setFactory(io.vertx.core.spi.VertxMetricsFactory)}.
-
-== OSGi
-
-Vert.x Core is packaged as an OSGi bundle, so can be used in any OSGi R4.2+ environment such as Apache Felix
-or Eclipse Equinox. The bundle exports `io.vertx.core*`.
-
-However, the bundle has some dependencies on Jackson and Netty. To get the vert.x core bundle resolved deploy:
-
-* Jackson Annotation [2.6.0,3)
-* Jackson Core [2.6.2,3)
-* Jackson Databind [2.6.2,3)
-* Netty Buffer [4.0.31,5)
-* Netty Codec [4.0.31,5)
-* Netty Codec/Socks [4.0.31,5)
-* Netty Codec/Common [4.0.31,5)
-* Netty Codec/Handler [4.0.31,5)
-* Netty Codec/Transport [4.0.31,5)
-
-Here is a working deployment on Apache Felix 5.2.0:
-
-[source]
-----
-14|Active     |    1|Jackson-annotations (2.6.0)
-15|Active     |    1|Jackson-core (2.6.2)
-16|Active     |    1|jackson-databind (2.6.2)
-18|Active     |    1|Netty/Buffer (4.0.31.Final)
-19|Active     |    1|Netty/Codec (4.0.31.Final)
-20|Active     |    1|Netty/Codec/HTTP (4.0.31.Final)
-21|Active     |    1|Netty/Codec/Socks (4.0.31.Final)
-22|Active     |    1|Netty/Common (4.0.31.Final)
-23|Active     |    1|Netty/Handler (4.0.31.Final)
-24|Active     |    1|Netty/Transport (4.0.31.Final)
-25|Active     |    1|Netty/Transport/SCTP (4.0.31.Final)
-26|Active     |    1|Vert.x Core (3.1.0)
-----
-
-On Equinox, you may want to disable the `ContextFinder` with the following framework property:
-`eclipse.bundle.setTCCL=false`
-
 
 == The 'vertx' command line
 
@@ -1431,8 +1357,8 @@ You need to add the following dependency in your classpath:
 <dependency>
   <groupId>io.netty</groupId>
   <artifactId>netty-transport-native-epoll</artifactId>
-  <version>4.1.15.Final</version>
   <classifier>linux-x86_64</classifier>
+  <!--<version>Should align with netty version that Vert.x uses</version>-->
 </dependency>
 ----
 
@@ -1457,8 +1383,8 @@ You need to add the following dependency in your classpath:
 <dependency>
   <groupId>io.netty</groupId>
   <artifactId>netty-transport-native-kqueue</artifactId>
-  <version>4.1.15.Final</version>
   <classifier>osx-x86_64</classifier>
+  <!--<version>Should align with netty version that Vert.x uses</version>-->
 </dependency>
 ----
 

@@ -30,7 +30,9 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.*;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpVersion;
-import io.vertx.core.http.impl.pool.ConnectionListener;
+import io.vertx.core.http.impl.headers.HeadersAdaptor;
+import io.vertx.core.impl.PromiseInternal;
+import io.vertx.core.net.impl.clientconnection.ConnectionListener;
 import io.vertx.core.impl.ContextInternal;
 import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
@@ -39,6 +41,7 @@ import io.vertx.core.net.SocketAddress;
 import io.vertx.core.net.impl.ConnectionBase;
 import io.vertx.core.net.impl.NetSocketImpl;
 import io.vertx.core.net.impl.VertxHandler;
+import io.vertx.core.spi.metrics.ClientMetrics;
 import io.vertx.core.spi.metrics.HttpClientMetrics;
 import io.vertx.core.spi.tracing.TagExtractor;
 import io.vertx.core.spi.tracing.VertxTracer;
@@ -72,29 +75,31 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
   private final HttpClientOptions options;
   private final boolean ssl;
   private final SocketAddress server;
-  private final Object endpointMetric;
-  private final HttpClientMetrics metrics;
+  public final ClientMetrics metrics;
   private final HttpVersion version;
 
   private Deque<Stream> requests = new ArrayDeque<>();
   private Deque<Stream> responses = new ArrayDeque<>();
+  private boolean closed;
+  private boolean shutdown;
+  private long shutdownTimerID = -1L;
 
   private Handler<Object> invalidMessageHandler = INVALID_MSG_HANDLER;
   private boolean close;
   private Promise<NetSocket> netSocketPromise;
   private int keepAliveTimeout;
+  private long expirationTimestamp;
   private int seq = 1;
   private long bytesRead;
 
   Http1xClientConnection(ConnectionListener<HttpClientConnection> listener,
                          HttpVersion version,
                          HttpClientImpl client,
-                         Object endpointMetric,
                          ChannelHandlerContext channel,
                          boolean ssl,
                          SocketAddress server,
                          ContextInternal context,
-                         HttpClientMetrics metrics) {
+                         ClientMetrics metrics) {
     super(client.getVertx(), channel, context);
     this.listener = listener;
     this.client = client;
@@ -103,12 +108,7 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
     this.server = server;
     this.metrics = metrics;
     this.version = version;
-    this.endpointMetric = endpointMetric;
     this.keepAliveTimeout = options.getKeepAliveTimeout();
-  }
-
-  Object endpointMetric() {
-    return endpointMetric;
   }
 
   ConnectionListener<HttpClientConnection> listener() {
@@ -119,9 +119,9 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
     HttpMethod method,
     String uri,
     MultiMap headerMap,
-    String hostHeader,
+    String authority,
     boolean chunked) {
-    DefaultHttpRequest request = new DefaultHttpRequest(HttpUtils.toNettyHttpVersion(version), HttpMethodImpl.toNetty(method), uri, false);
+    DefaultHttpRequest request = new DefaultHttpRequest(HttpUtils.toNettyHttpVersion(version), method.toNetty(), uri, false);
     HttpHeaders headers = request.headers();
     if (headerMap != null) {
       for (Map.Entry<String, String> header : headerMap) {
@@ -129,7 +129,7 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
       }
     }
     if (!headers.contains(HOST)) {
-      request.headers().set(HOST, hostHeader);
+      request.headers().set(HOST, authority);
     } else {
       headers.remove(TRANSFER_ENCODING);
     }
@@ -153,7 +153,7 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
       responses.add(stream);
       this.netSocketPromise = ((StreamImpl)stream).netSocketPromise;
       if (this.metrics != null) {
-        stream.metric = this.metrics.requestBegin(this.endpointMetric, this.metric(), this.localAddress(), this.remoteAddress(), stream.request);
+        stream.metric = this.metrics.requestBegin(stream.request.uri, stream.request);
       }
       VertxTracer tracer = context.tracer();
       if (tracer != null) {
@@ -312,8 +312,8 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
     }
 
     @Override
-    public void writeHead(HttpMethod method, String uri, MultiMap headers, String hostHeader, boolean chunked, ByteBuf buf, boolean end, StreamPriority priority, Handler<AsyncResult<Void>> handler) {
-      HttpRequest request = conn.createRequest(method, uri, headers, hostHeader, chunked);
+    public void writeHead(HttpMethod method, String uri, MultiMap headers, String authority, boolean chunked, ByteBuf buf, boolean end, StreamPriority priority, Handler<AsyncResult<Void>> handler) {
+      HttpRequest request = conn.createRequest(method, uri, headers, authority, chunked);
       if (end) {
         if (buf != null) {
           request = new AssembledFullHttpRequest(request, buf);
@@ -510,33 +510,34 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
   }
 
   private void handleHttpMessage(HttpObject obj) {
+    Stream stream;
+    synchronized (this) {
+      stream = responses.peekFirst();
+      if (stream == null) {
+        return;
+      }
+    }
     if (obj instanceof HttpResponse) {
-      handleResponseBegin((HttpResponse) obj);
+      handleResponseBegin(stream, (HttpResponse) obj);
     } else if (obj instanceof HttpContent) {
       HttpContent chunk = (HttpContent) obj;
       if (chunk.content().isReadable()) {
         Buffer buff = Buffer.buffer(VertxHandler.safeBuffer(chunk.content(), chctx.alloc()));
-        handleResponseChunk(buff);
+        handleResponseChunk(stream, buff);
       }
       if (chunk instanceof LastHttpContent) {
-        handleResponseEnd((LastHttpContent) chunk);
+        handleResponseEnd(stream, (LastHttpContent) chunk);
       }
     }
   }
 
-  private void handleResponseBegin(HttpResponse resp) {
+  private void handleResponseBegin(Stream stream, HttpResponse resp) {
     if (resp.status().code() == 100) {
-      Stream stream;
-      synchronized (this) {
-        stream = responses.getFirst();
-      }
       stream.context.schedule(null, v -> stream.handleContinue());
     } else {
-      Stream stream;
       HttpClientResponseImpl response;
       HttpClientRequestImpl request;
       synchronized (this) {
-        stream = responses.getFirst();
         request = stream.request;
 
         HttpVersion version;
@@ -588,8 +589,6 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
              request.method == HttpMethod.GET &&
              request.headers().contains("connection", "Upgrade", false) &&
              response.statusCode() == 101)) {
-          // remove connection from the pool
-          listener.onEvict();
 
           // remove old http handlers
           ChannelPipeline pipeline = chctx.pipeline();
@@ -605,12 +604,14 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
           pipeline.remove("codec");
 
           // replace the old handler with one that handle plain sockets
-          NetSocketImpl socket = new NetSocketImpl(vertx, chctx, context, client.getSslHelper(), metrics) {
+          NetSocketImpl socket = new NetSocketImpl(vertx, chctx, context, client.getSslHelper(), metrics()) {
             @Override
             protected void handleClosed() {
               if (metrics != null) {
                 metrics.responseEnd(stream.metric, response);
               }
+              // remove connection from the pool
+              listener.onEvict();
               super.handleClosed();
             }
           };
@@ -631,23 +632,17 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
     }
   }
 
-  private void handleResponseChunk(Buffer buff) {
-    Stream resp;
+  private void handleResponseChunk(Stream stream, Buffer buff) {
     synchronized (this) {
-      resp = responses.getFirst();
       bytesRead += buff.length();
     }
-    if (resp != null) {
-      resp.context.schedule(buff, resp::handleChunk);
-    }
+    stream.context.schedule(buff, stream::handleChunk);
   }
 
-  private void handleResponseEnd(LastHttpContent trailer) {
-    Stream stream;
+  private void handleResponseEnd(Stream stream, LastHttpContent trailer) {
     boolean check;
     long bytesRead;
     synchronized (this) {
-      stream = responses.getFirst();
       if (stream.response == null) {
         // 100-continue
         return;
@@ -675,7 +670,7 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
   }
 
   public HttpClientMetrics metrics() {
-    return metrics;
+    return client.metrics();
   }
 
   synchronized void toWebSocket(
@@ -684,7 +679,7 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
     WebsocketVersion vers,
     List<String> subProtocols,
     int maxWebSocketFrameSize,
-    Handler<AsyncResult<WebSocket>> wsHandler) {
+    Promise<WebSocket> promise) {
     try {
       URI wsuri = new URI(requestURI);
       if (!wsuri.isAbsolute()) {
@@ -742,27 +737,22 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
 
         }
         log.debug("WebSocket handshake complete");
+        HttpClientMetrics metrics = client.metrics();
         if (metrics != null) {
-          webSocket.setMetric(metrics.connected(endpointMetric, metric(), webSocket));
+          webSocket.setMetric(metrics.connected(webSocket));
         }
         getContext().dispatch(wsRes, res -> {
           if (res.succeeded()) {
             webSocket.headers(ar.result());
           }
-          wsHandler.handle(res);
+          promise.handle(res);
           if (res.succeeded()) {
             webSocket.headers(null);
           }
         });
       });
       p.addBefore("handler", "handshakeCompleter", handshakeInboundHandler);
-      handshaker
-        .handshake(chctx.channel())
-        .addListener(f -> {
-        if (!f.isSuccess()) {
-          wsHandler.handle(Future.failedFuture(f.cause()));
-        }
-      });
+      handshaker.handshake(chctx.channel());
     } catch (Exception e) {
       handleException(e);
     }
@@ -817,8 +807,15 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
 
   protected void handleClosed() {
     super.handleClosed();
+    long timerID = shutdownTimerID;
+    if (timerID != -1) {
+      shutdownTimerID = -1L;
+      vertx.cancelTimer(timerID);
+    }
+    closed = true;
     if (metrics != null) {
-      metrics.endpointDisconnected(endpointMetric, metric());
+      HttpClientMetrics met = client.metrics();
+      met.endpointDisconnected(metrics);
     }
     WebSocketImpl ws;
     VertxTracer tracer = context.tracer();
@@ -876,13 +873,21 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
     if (eventLoop.inEventLoop()) {
       StreamImpl stream;
       synchronized (this) {
-        stream = new StreamImpl(context, this, req, netSocketPromise, seq++);
-        if (requests.isEmpty()) {
-          stream.promise.complete(stream);
+        if (closed) {
+          stream = null;
+        } else {
+          stream = new StreamImpl(context, this, req, netSocketPromise, seq++);
+          requests.add(stream);
+          if (requests.size() == 1) {
+            stream.promise.complete(stream);
+          }
         }
-        requests.add(stream);
       }
-      stream.promise.future().setHandler(handler);
+      if (stream != null) {
+        stream.promise.future().onComplete(handler);
+      } else {
+        handler.handle(Future.failedFuture(CLOSED_EXCEPTION));
+      }
     } else {
       eventLoop.execute(() -> {
         createStream(context, req, netSocketPromise, handler);
@@ -890,8 +895,62 @@ class Http1xClientConnection extends Http1xConnectionBase<WebSocketImpl> impleme
     }
   }
 
+  @Override
+  public boolean isValid() {
+    return expirationTimestamp == 0 || System.currentTimeMillis() <= expirationTimestamp;
+  }
+
   private void recycle() {
-    long expiration = keepAliveTimeout == 0 ? 0L : System.currentTimeMillis() + keepAliveTimeout * 1000;
-    listener.onRecycle(expiration);
+    if (shutdown) {
+      if (requests.isEmpty() && responses.isEmpty()) {
+        close();
+      }
+    } else {
+      expirationTimestamp = keepAliveTimeout == 0 ? 0L : System.currentTimeMillis() + keepAliveTimeout * 1000;
+      listener.onRecycle();
+    }
+  }
+
+  @Override
+  public void shutdown(long timeout, Handler<AsyncResult<Void>> handler) {
+    shutdown(timeout, vertx.promise(handler));
+  }
+
+  @Override
+  public Future<Void> shutdown(long timeoutMs) {
+    PromiseInternal<Void> promise = vertx.promise();
+    shutdown(timeoutMs, promise);
+    return promise.future();
+  }
+
+  private synchronized void shutdownNow() {
+    shutdownTimerID = -1L;
+    close();
+  }
+
+  private void shutdown(long timeoutMs, PromiseInternal<Void> promise) {
+    synchronized (this) {
+      if (shutdown) {
+        promise.fail("Already shutdown");
+        return;
+      }
+      if (netSocketPromise != null) {
+        promise.fail("Connection upgraded to NetSocket");
+        return;
+      }
+      shutdown = true;
+      closeFuture().onComplete(promise);
+    }
+    listener.onEvict();
+    synchronized (this) {
+      if (!closed) {
+        if (timeoutMs > 0L) {
+          shutdownTimerID = context.setTimer(timeoutMs, id -> shutdownNow());
+        } else {
+          close = true;
+        }
+      }
+    }
+    checkLifecycle();
   }
 }

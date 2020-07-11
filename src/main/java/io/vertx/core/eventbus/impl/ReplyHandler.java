@@ -65,16 +65,17 @@ class ReplyHandler<T> extends HandlerRegistration<T> {
 
 
   @Override
-  protected void doReceive(Message<T> reply) {
-    dispatch(null, reply, context);
-  }
-
-  @Override
-  protected void doUnregister() {
+  protected boolean doReceive(Message<T> reply) {
+    try {
+      dispatch(null, reply, context);
+    } finally {
+      unregister();
+    }
+    return true;
   }
 
   void register() {
-    register(repliedAddress, true, ar -> {});
+    register(repliedAddress, true, null);
   }
 
   @Override

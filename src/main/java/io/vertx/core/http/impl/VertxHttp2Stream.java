@@ -27,6 +27,7 @@ import io.vertx.core.file.FileSystem;
 import io.vertx.core.file.OpenOptions;
 import io.vertx.core.http.HttpFrame;
 import io.vertx.core.http.StreamPriority;
+import io.vertx.core.http.impl.headers.Http2HeadersAdaptor;
 import io.vertx.core.impl.ContextInternal;
 import io.vertx.core.impl.VertxInternal;
 import io.vertx.core.streams.impl.InboundBuffer;
@@ -46,17 +47,16 @@ abstract class VertxHttp2Stream<C extends Http2ConnectionBase> {
   protected final C conn;
   protected final VertxInternal vertx;
   protected final ContextInternal context;
-
   protected Http2Stream stream;
 
-  private final InboundBuffer<Object> pending;
-  private MultiMap trailers;
-  private boolean writable; // SHOULD BE CLEAR ABOUT VISIBILITY : currently it's modified by connection and read by stream
+  // Event loop
   private long bytesRead;
   private long bytesWritten;
 
   // Client context
   private StreamPriority priority;
+  private final InboundBuffer<Object> pending;
+  private boolean writable;
 
   VertxHttp2Stream(C conn, ContextInternal context) {
     this.conn = conn;
@@ -65,12 +65,12 @@ abstract class VertxHttp2Stream<C extends Http2ConnectionBase> {
     this.pending = new InboundBuffer<>(context, 5);
     this.priority = HttpUtils.DEFAULT_STREAM_PRIORITY;
 
-    pending.handler(buff -> {
-      if (buff == InboundBuffer.END_SENTINEL) {
+    pending.handler(item -> {
+      if (item instanceof MultiMap) {
         conn.reportBytesRead(bytesRead);
-        handleEnd(trailers);
+        handleEnd((MultiMap) item);
       } else {
-        Buffer data = (Buffer) buff;
+        Buffer data = (Buffer) item;
         int len = data.length();
         conn.getContext().dispatch(null, v -> conn.consumeCredits(this.stream, len));
         bytesRead += len;
@@ -78,13 +78,14 @@ abstract class VertxHttp2Stream<C extends Http2ConnectionBase> {
       }
     });
     pending.exceptionHandler(context::reportException);
-
     pending.resume();
   }
 
   void init(Http2Stream stream) {
-    this.stream = stream;
-    this.writable = this.conn.handler.encoder().flowController().isWritable(stream);
+    synchronized (this) {
+      this.stream = stream;
+      this.writable = this.conn.handler.encoder().flowController().isWritable(stream);
+    }
     stream.setProperty(conn.streamKey, this);
   }
 
@@ -122,21 +123,22 @@ abstract class VertxHttp2Stream<C extends Http2ConnectionBase> {
   }
 
   void onWritabilityChanged() {
-    synchronized (conn) {
-      writable = !writable;
-    }
-    context.dispatch(null, v -> handleInterestedOpsChanged());
+    context.dispatch(null, v -> {
+      boolean w;
+      synchronized (VertxHttp2Stream.this) {
+        writable = !writable;
+        w = writable;
+      }
+      handleWritabilityChanged(w);
+    });
   }
 
   void onEnd() {
     onEnd(EMPTY);
   }
 
-  void onEnd(MultiMap map) {
-    synchronized (conn) {
-      trailers = map;
-    }
-    context.dispatch(InboundBuffer.END_SENTINEL, pending::write);
+  void onEnd(MultiMap trailers) {
+    context.dispatch(trailers, pending::write);
   }
 
   public int id() {
@@ -159,10 +161,8 @@ abstract class VertxHttp2Stream<C extends Http2ConnectionBase> {
     pending.fetch(amount);
   }
 
-  public boolean isNotWritable() {
-    synchronized (conn) {
-      return !writable;
-    }
+  public synchronized boolean isNotWritable() {
+    return !writable;
   }
 
   public final void writeFrame(int type, int flags, ByteBuf payload) {
@@ -226,10 +226,19 @@ abstract class VertxHttp2Stream<C extends Http2ConnectionBase> {
   }
 
   private void doWriteReset(long code) {
-    conn.handler.writeReset(stream.id(), code);
+    int streamId;
+    synchronized (this) {
+      streamId = stream != null ? stream.id() : -1;
+    }
+    if (streamId != -1) {
+      conn.handler.writeReset(streamId, code);
+    } else {
+      // Reset happening before stream allocation
+      handleReset(code);
+    }
   }
 
-  void handleInterestedOpsChanged() {
+  void handleWritabilityChanged(boolean writable) {
   }
 
   void handleData(Buffer buf) {
@@ -276,20 +285,22 @@ abstract class VertxHttp2Stream<C extends Http2ConnectionBase> {
       resultHandler.handle(Future.failedFuture(new FileNotFoundException()));
       return;
     }
+
+    //We open the fileName using a RandomAccessFile to make sure that this is an actual file that can be read.
+    //i.e is not a directory
     try(RandomAccessFile raf = new RandomAccessFile(file_, "r")) {
+      FileSystem fs = conn.vertx().fileSystem();
+      fs.open(filename, new OpenOptions().setCreate(false).setWrite(false), ar -> {
+        if (ar.succeeded()) {
+          AsyncFile file = ar.result();
+          long contentLength = Math.min(length, file_.length() - offset);
+          file.setReadPos(offset);
+          file.setReadLength(contentLength);
+        }
+        resultHandler.handle(ar);
+      });
     } catch (IOException e) {
       resultHandler.handle(Future.failedFuture(e));
-      return;
     }
-    FileSystem fs = conn.vertx().fileSystem();
-    fs.open(filename, new OpenOptions().setCreate(false).setWrite(false), ar -> {
-      if (ar.succeeded()) {
-        AsyncFile file = ar.result();
-        long contentLength = Math.min(length, file_.length() - offset);
-        file.setReadPos(offset);
-        file.setReadLength(contentLength);
-      }
-      resultHandler.handle(ar);
-    });
   }
 }

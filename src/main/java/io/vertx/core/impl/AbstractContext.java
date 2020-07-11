@@ -218,14 +218,18 @@ abstract class AbstractContext implements ContextInternal {
 
   @Override
   public final List<String> processArgs() {
-    // As we are maintaining the launcher and starter class, choose the right one.
-    List<String> processArgument = VertxCommandLauncher.getProcessArguments();
-    return processArgument != null ? processArgument : Starter.PROCESS_ARGS;
+    return VertxCommandLauncher.getProcessArguments();
   }
 
   @Override
   public final <T> void executeBlockingInternal(Handler<Promise<T>> action, Handler<AsyncResult<T>> resultHandler) {
     Future<T> fut = executeBlockingInternal(action);
+    setResultHandler(this, fut, resultHandler);
+  }
+
+  @Override
+  public <T> void executeBlockingInternal(Handler<Promise<T>> action, boolean ordered, Handler<AsyncResult<T>> resultHandler) {
+    Future<T> fut = executeBlockingInternal(action, ordered);
     setResultHandler(this, fut, resultHandler);
   }
 
@@ -261,7 +265,7 @@ abstract class AbstractContext implements ContextInternal {
       return (PromiseInternal<T>) handler;
     } else {
       PromiseInternal<T> promise = promise();
-      promise.future().setHandler(handler);
+      promise.future().onComplete(handler);
       return promise;
     }
   }
@@ -318,15 +322,13 @@ abstract class AbstractContext implements ContextInternal {
     return localContextData().remove(key) != null;
   }
 
+  public abstract CloseHooks closeHooks();
+
   private static <T> void setResultHandler(ContextInternal ctx, Future<T> fut, Handler<AsyncResult<T>> resultHandler) {
     if (resultHandler != null) {
-      fut.setHandler(resultHandler);
+      fut.onComplete(resultHandler);
     } else {
-      fut.setHandler(ar -> {
-        if (ar.failed()) {
-          ctx.reportException(ar.cause());
-        }
-      });
+      fut.onFailure(ctx::reportException);
     }
   }
 }

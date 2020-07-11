@@ -61,15 +61,7 @@ public class DeploymentManager {
     if (options.getInstances() < 1) {
       throw new IllegalArgumentException("Can't specify < 1 instances to deploy");
     }
-    if (options.getExtraClasspath() != null) {
-      throw new IllegalArgumentException("Can't specify extraClasspath for already created verticle");
-    }
-    if (options.getIsolationGroup() != null) {
-      throw new IllegalArgumentException("Can't specify isolationGroup for already created verticle");
-    }
-    if (options.getIsolatedClasses() != null) {
-      throw new IllegalArgumentException("Can't specify isolatedClasses for already created verticle");
-    }
+    options.checkIsolationNotDefined();
     ContextInternal currentContext = vertx.getOrCreateContext();
     ClassLoader cl = getCurrentClassLoader();
     return doDeploy(options, v -> "java:" + v.getClass().getName(), currentContext, currentContext, cl, verticleSupplier)
@@ -109,7 +101,7 @@ public class DeploymentManager {
       for (String deploymentID : deploymentIDs) {
         Promise<Void> promise = Promise.promise();
         completionList.add(promise.future());
-        undeployVerticle(deploymentID).setHandler(ar -> {
+        undeployVerticle(deploymentID).onComplete(ar -> {
           if (ar.failed()) {
             // Log but carry on regardless
             log.error("Undeploy failed", ar.cause());
@@ -118,7 +110,7 @@ public class DeploymentManager {
         });
       }
       Promise<Void> promise = vertx.getOrCreateContext().promise();
-      CompositeFuture.join(completionList).<Void>mapEmpty().setHandler(promise);
+      CompositeFuture.join(completionList).<Void>mapEmpty().onComplete(promise);
       return promise.future();
     } else {
       return vertx.getOrCreateContext().succeededFuture();
@@ -193,21 +185,23 @@ public class DeploymentManager {
     AtomicInteger deployCount = new AtomicInteger();
     AtomicBoolean failureReported = new AtomicBoolean();
     for (Verticle verticle: verticles) {
+      CloseHooks closeHooks = new CloseHooks(log);
       WorkerExecutorInternal workerExec = poolName != null ? vertx.createSharedWorkerExecutor(poolName, options.getWorkerPoolSize(), options.getMaxWorkerExecuteTime(), options.getMaxWorkerExecuteTimeUnit()) : null;
       WorkerPool pool = workerExec != null ? workerExec.getPool() : null;
-      ContextImpl context = (ContextImpl) (options.isWorker() ? vertx.createWorkerContext(deployment, pool, tccl) :
-        vertx.createEventLoopContext(deployment, pool, tccl));
+      ContextImpl context = (ContextImpl) (options.isWorker() ? vertx.createWorkerContext(deployment, closeHooks, pool, tccl) :
+        vertx.createEventLoopContext(deployment, closeHooks, pool, tccl));
       if (workerExec != null) {
-        context.addCloseHook(workerExec);
+        closeHooks.add(workerExec);
       }
-      deployment.addVerticle(new VerticleHolder(verticle, context));
+      VerticleHolder holder = new VerticleHolder(verticle, context, closeHooks);
+      deployment.addVerticle(holder);
       context.runOnContext(v -> {
         try {
           verticle.init(vertx, context);
           Promise<Void> startPromise = context.promise();
           Future<Void> startFuture = startPromise.future();
           verticle.start(startPromise);
-          startFuture.setHandler(ar -> {
+          startFuture.onComplete(ar -> {
             if (ar.succeeded()) {
               if (parent != null) {
                 if (parent.addChild(deployment)) {
@@ -218,21 +212,17 @@ public class DeploymentManager {
                   return;
                 }
               }
-              VertxMetrics metrics = vertx.metricsSPI();
-              if (metrics != null) {
-                metrics.verticleDeployed(verticle);
-              }
               deployments.put(deploymentID, deployment);
               if (deployCount.incrementAndGet() == verticles.length) {
                 promise.complete(deployment);
               }
             } else if (failureReported.compareAndSet(false, true)) {
-              deployment.rollback(callingContext, promise, context, ar.cause());
+              deployment.rollback(callingContext, promise, context, holder.closeHooks, ar.cause());
             }
           });
         } catch (Throwable t) {
           if (failureReported.compareAndSet(false, true))
-            deployment.rollback(callingContext, promise, context, t);
+            deployment.rollback(callingContext, promise, context, holder.closeHooks, t);
         }
       });
     }
@@ -241,12 +231,15 @@ public class DeploymentManager {
   }
 
   static class VerticleHolder {
+
     final Verticle verticle;
     final ContextImpl context;
+    final CloseHooks closeHooks;
 
-    VerticleHolder(Verticle verticle, ContextImpl context) {
+    VerticleHolder(Verticle verticle, ContextImpl context, CloseHooks closeHooks) {
       this.verticle = verticle;
       this.context = context;
+      this.closeHooks = closeHooks;
     }
   }
 
@@ -261,6 +254,7 @@ public class DeploymentManager {
     private final List<VerticleHolder> verticles = new CopyOnWriteArrayList<>();
     private final Set<Deployment> children = new ConcurrentHashSet<>();
     private final DeploymentOptions options;
+    private Handler<Void> undeployHandler;
     private int status = ST_DEPLOYED;
     private volatile boolean child;
 
@@ -276,17 +270,27 @@ public class DeploymentManager {
       verticles.add(holder);
     }
 
-    private synchronized void rollback(ContextInternal callingContext, Handler<AsyncResult<Deployment>> completionHandler, ContextImpl context, Throwable cause) {
+    private synchronized void rollback(ContextInternal callingContext, Handler<AsyncResult<Deployment>> completionHandler, ContextImpl context, CloseHooks closeHooks, Throwable cause) {
       if (status == ST_DEPLOYED) {
         status = ST_UNDEPLOYING;
-        doUndeployChildren(callingContext).setHandler(childrenResult -> {
+        doUndeployChildren(callingContext).onComplete(childrenResult -> {
+          Handler<Void> handler;
           synchronized (DeploymentImpl.this) {
             status = ST_UNDEPLOYED;
+            handler = undeployHandler;
+            undeployHandler = null;
+          }
+          if (handler != null) {
+            try {
+              handler.handle(null);
+            } catch (Exception e) {
+              context.reportException(e);
+            }
           }
           if (childrenResult.failed()) {
             reportFailure(cause, callingContext, completionHandler);
           } else {
-            context.runCloseHooks(closeHookAsyncResult -> reportFailure(cause, callingContext, completionHandler));
+            closeHooks.run(closeHookAsyncResult -> reportFailure(cause, callingContext, completionHandler));
           }
         });
       }
@@ -335,13 +339,9 @@ public class DeploymentManager {
           context.runOnContext(v -> {
             Promise<Void> stopPromise = Promise.promise();
             Future<Void> stopFuture = stopPromise.future();
-            stopFuture.setHandler(ar -> {
+            stopFuture.onComplete(ar -> {
               deployments.remove(deploymentID);
-              VertxMetrics metrics = vertx.metricsSPI();
-              if (metrics != null) {
-                metrics.verticleUndeployed(verticleHolder.verticle);
-              }
-              context.runCloseHooks(ar2 -> {
+              verticleHolder.closeHooks.run(ar2 -> {
                 if (ar2.failed()) {
                   // Log error but we report success anyway
                   log.error("Failed to run close hook", ar2.cause());
@@ -363,8 +363,16 @@ public class DeploymentManager {
           });
         }
         Promise<Void> resolvingPromise = undeployingContext.promise();
-        CompositeFuture.all(undeployFutures).<Void>mapEmpty().setHandler(resolvingPromise);
-        return resolvingPromise.future();
+        CompositeFuture.all(undeployFutures).<Void>mapEmpty().onComplete(resolvingPromise);
+        Future<Void> fut = resolvingPromise.future();
+        Handler<Void> handler = undeployHandler;
+        if (handler != null) {
+          undeployHandler = null;
+          fut.onComplete(ar -> {
+            handler.handle(null);
+          });
+        }
+        return fut;
       }
     }
 
@@ -417,6 +425,17 @@ public class DeploymentManager {
     }
 
     @Override
+    public void undeployHandler(Handler<Void> handler) {
+      synchronized (this) {
+        if (status != ST_UNDEPLOYED) {
+          undeployHandler = handler;
+          return;
+        }
+      }
+      handler.handle(null);
+    }
+
+    @Override
     public boolean isChild() {
       return child;
     }
@@ -425,7 +444,6 @@ public class DeploymentManager {
     public String deploymentID() {
       return deploymentID;
     }
-
   }
 
 }

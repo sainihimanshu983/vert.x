@@ -16,6 +16,7 @@ import io.vertx.core.AsyncResult;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.MultiMap;
+import io.vertx.core.Promise;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.*;
 import io.vertx.core.net.SocketAddress;
@@ -38,7 +39,7 @@ class HttpClientRequestPushPromise extends HttpClientRequestBase {
     String host,
     int port,
     MultiMap headers) {
-    super(client, conn.getContext(), ssl, method, SocketAddress.inetSocketAddress(port, host), host, port, uri);
+    super(client, conn.getContext().promise(), ssl, method, SocketAddress.inetSocketAddress(port, host), host, port, uri);
     this.conn = conn;
     this.stream = new Http2ClientConnection.StreamImpl(conn, conn.getContext(), this, null);
     this.headers = headers;
@@ -49,8 +50,8 @@ class HttpClientRequestPushPromise extends HttpClientRequestBase {
   }
 
   @Override
-  void handleResponse(HttpClientResponse resp, long timeoutMs) {
-    responsePromise.complete(resp);
+  void handleResponse(Promise<HttpClientResponse> promise, HttpClientResponse resp, long timeoutMs) {
+    promise.complete(resp);
   }
 
   @Override
@@ -76,7 +77,7 @@ class HttpClientRequestPushPromise extends HttpClientRequestBase {
 
 
   @Override
-  public String getHost() {
+  public String getAuthority() {
     return server.host();
   }
 
@@ -116,7 +117,7 @@ class HttpClientRequestPushPromise extends HttpClientRequestBase {
   }
 
   @Override
-  public HttpClientRequest setHost(String host) {
+  public HttpClientRequest setAuthority(String authority) {
     throw new IllegalStateException();
   }
 

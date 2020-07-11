@@ -34,6 +34,7 @@ import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServerResponse;
 import io.vertx.core.http.StreamPriority;
 import io.vertx.core.http.StreamResetException;
+import io.vertx.core.http.impl.headers.Http2HeadersAdaptor;
 import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.impl.ConnectionBase;
 
@@ -314,7 +315,6 @@ public class Http2ServerResponseImpl implements HttpServerResponse {
     synchronized (conn) {
       checkHeadWritten();
       stream.writeHeaders(new DefaultHttp2Headers().status("100"), false, null);
-      ctx.flush();
       return this;
     }
   }
@@ -529,8 +529,8 @@ public class Http2ServerResponseImpl implements HttpServerResponse {
     }
   }
 
-  void writabilityChanged() {
-    if (!ended && !writeQueueFull() && drainHandler != null) {
+  void handlerWritabilityChanged(boolean writable) {
+    if (!ended && writable && drainHandler != null) {
       drainHandler.handle(null);
     }
   }
@@ -600,7 +600,13 @@ public class Http2ServerResponseImpl implements HttpServerResponse {
           }
         }
         checkSendHeaders(false);
-        file.pipeTo(this, h);
+        file.pipeTo(this, ar1 -> file.close(ar2 -> {
+          Throwable failure = ar1.failed() ? ar1.cause() : ar2.failed() ? ar2.cause() : null;
+          if(failure == null)
+            h.handle(ar1);
+          else
+            h.handle(Future.failedFuture(failure));
+        }));
       } else {
         h.handle(ar.mapEmpty());
       }

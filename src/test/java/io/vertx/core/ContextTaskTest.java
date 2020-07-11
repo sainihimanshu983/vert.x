@@ -57,11 +57,11 @@ public class ContextTaskTest extends VertxTestBase {
   }
 
   private ContextInternal createEventLoopContext() {
-    return ((VertxInternal) vertx).getOrCreateContext();
+    return ((VertxInternal) vertx).createEventLoopContext();
   }
 
   private ContextInternal createWorkerContext() {
-    return ((VertxInternal) vertx).createWorkerContext(null, new WorkerPool(workerExecutor, null), Thread.currentThread().getContextClassLoader());
+    return ((VertxInternal) vertx).createWorkerContext(null, null, new WorkerPool(workerExecutor, null), Thread.currentThread().getContextClassLoader());
   }
 
   // SCHEDULE + DISPATCH

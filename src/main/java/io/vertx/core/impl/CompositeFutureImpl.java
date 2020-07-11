@@ -28,7 +28,7 @@ public class CompositeFutureImpl implements CompositeFuture {
     CompositeFutureImpl composite = new CompositeFutureImpl(results);
     int len = results.length;
     for (Future<?> result : results) {
-      result.setHandler(ar -> {
+      result.onComplete(ar -> {
         if (ar.succeeded()) {
           synchronized (composite) {
             composite.count++;
@@ -57,7 +57,7 @@ public class CompositeFutureImpl implements CompositeFuture {
     CompositeFutureImpl composite = new CompositeFutureImpl(results);
     int len = results.length;
     for (Future<?> result : results) {
-      result.setHandler(ar -> {
+      result.onComplete(ar -> {
         if (ar.succeeded()) {
           synchronized (composite) {
             if (composite.isComplete()) {
@@ -100,7 +100,7 @@ public class CompositeFutureImpl implements CompositeFuture {
     CompositeFutureImpl composite = new CompositeFutureImpl(results);
     int len = results.length;
     for (Future<?> result : results) {
-      result.setHandler(ar -> {
+      result.onComplete(ar -> {
         synchronized (composite) {
           composite.count++;
           if (composite.isComplete() || composite.count < len) {
@@ -130,11 +130,6 @@ public class CompositeFutureImpl implements CompositeFuture {
   public CompositeFuture onComplete(Handler<AsyncResult<CompositeFuture>> handler) {
     promise.future().onComplete(handler);
     return this;
-  }
-
-  @Override
-  public synchronized Handler<AsyncResult<CompositeFuture>> getHandler() {
-    return promise.future().getHandler();
   }
 
   @Override

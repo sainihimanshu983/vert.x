@@ -25,6 +25,11 @@ public class EventBusOptionsConverter {
             obj.setClientAuth(io.vertx.core.http.ClientAuth.valueOf((String)member.getValue()));
           }
           break;
+        case "clusterNodeMetadata":
+          if (member.getValue() instanceof JsonObject) {
+            obj.setClusterNodeMetadata(((JsonObject)member.getValue()).copy());
+          }
+          break;
         case "clusterPingInterval":
           if (member.getValue() instanceof Number) {
             obj.setClusterPingInterval(((Number)member.getValue()).longValue());
@@ -43,11 +48,6 @@ public class EventBusOptionsConverter {
         case "clusterPublicPort":
           if (member.getValue() instanceof Number) {
             obj.setClusterPublicPort(((Number)member.getValue()).intValue());
-          }
-          break;
-        case "clustered":
-          if (member.getValue() instanceof Boolean) {
-            obj.setClustered((Boolean)member.getValue());
           }
           break;
         case "connectTimeout":
@@ -106,12 +106,12 @@ public class EventBusOptionsConverter {
           break;
         case "jdkSslEngineOptions":
           if (member.getValue() instanceof JsonObject) {
-            obj.setJdkSslEngineOptions(new io.vertx.core.net.JdkSSLEngineOptions((JsonObject)member.getValue()));
+            obj.setJdkSslEngineOptions(new io.vertx.core.net.JdkSSLEngineOptions((io.vertx.core.json.JsonObject)member.getValue()));
           }
           break;
         case "keyStoreOptions":
           if (member.getValue() instanceof JsonObject) {
-            obj.setKeyStoreOptions(new io.vertx.core.net.JksOptions((JsonObject)member.getValue()));
+            obj.setKeyStoreOptions(new io.vertx.core.net.JksOptions((io.vertx.core.json.JsonObject)member.getValue()));
           }
           break;
         case "logActivity":
@@ -121,27 +121,27 @@ public class EventBusOptionsConverter {
           break;
         case "openSslEngineOptions":
           if (member.getValue() instanceof JsonObject) {
-            obj.setOpenSslEngineOptions(new io.vertx.core.net.OpenSSLEngineOptions((JsonObject)member.getValue()));
+            obj.setOpenSslEngineOptions(new io.vertx.core.net.OpenSSLEngineOptions((io.vertx.core.json.JsonObject)member.getValue()));
           }
           break;
         case "pemKeyCertOptions":
           if (member.getValue() instanceof JsonObject) {
-            obj.setPemKeyCertOptions(new io.vertx.core.net.PemKeyCertOptions((JsonObject)member.getValue()));
+            obj.setPemKeyCertOptions(new io.vertx.core.net.PemKeyCertOptions((io.vertx.core.json.JsonObject)member.getValue()));
           }
           break;
         case "pemTrustOptions":
           if (member.getValue() instanceof JsonObject) {
-            obj.setPemTrustOptions(new io.vertx.core.net.PemTrustOptions((JsonObject)member.getValue()));
+            obj.setPemTrustOptions(new io.vertx.core.net.PemTrustOptions((io.vertx.core.json.JsonObject)member.getValue()));
           }
           break;
         case "pfxKeyCertOptions":
           if (member.getValue() instanceof JsonObject) {
-            obj.setPfxKeyCertOptions(new io.vertx.core.net.PfxOptions((JsonObject)member.getValue()));
+            obj.setPfxKeyCertOptions(new io.vertx.core.net.PfxOptions((io.vertx.core.json.JsonObject)member.getValue()));
           }
           break;
         case "pfxTrustOptions":
           if (member.getValue() instanceof JsonObject) {
-            obj.setPfxTrustOptions(new io.vertx.core.net.PfxOptions((JsonObject)member.getValue()));
+            obj.setPfxTrustOptions(new io.vertx.core.net.PfxOptions((io.vertx.core.json.JsonObject)member.getValue()));
           }
           break;
         case "port":
@@ -236,7 +236,7 @@ public class EventBusOptionsConverter {
           break;
         case "trustStoreOptions":
           if (member.getValue() instanceof JsonObject) {
-            obj.setTrustStoreOptions(new io.vertx.core.net.JksOptions((JsonObject)member.getValue()));
+            obj.setTrustStoreOptions(new io.vertx.core.net.JksOptions((io.vertx.core.json.JsonObject)member.getValue()));
           }
           break;
         case "useAlpn":
@@ -257,13 +257,15 @@ public class EventBusOptionsConverter {
     if (obj.getClientAuth() != null) {
       json.put("clientAuth", obj.getClientAuth().name());
     }
+    if (obj.getClusterNodeMetadata() != null) {
+      json.put("clusterNodeMetadata", obj.getClusterNodeMetadata());
+    }
     json.put("clusterPingInterval", obj.getClusterPingInterval());
     json.put("clusterPingReplyInterval", obj.getClusterPingReplyInterval());
     if (obj.getClusterPublicHost() != null) {
       json.put("clusterPublicHost", obj.getClusterPublicHost());
     }
     json.put("clusterPublicPort", obj.getClusterPublicPort());
-    json.put("clustered", obj.isClustered());
     json.put("connectTimeout", obj.getConnectTimeout());
     if (obj.getCrlPaths() != null) {
       JsonArray array = new JsonArray();

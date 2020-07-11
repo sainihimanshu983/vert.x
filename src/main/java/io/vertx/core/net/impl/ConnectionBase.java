@@ -15,6 +15,7 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.stream.ChunkedFile;
+import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.FutureListener;
 import io.vertx.core.*;
@@ -54,6 +55,8 @@ public abstract class ConnectionBase {
    * trace to not be misleading.
    */
   public static final VertxException CLOSED_EXCEPTION = new VertxException("Connection was closed", true);
+  public static final AttributeKey<SocketAddress> REMOTE_ADDRESS_OVERRIDE = AttributeKey.valueOf("RemoteAddressOverride");
+  public static final AttributeKey<SocketAddress> LOCAL_ADDRESS_OVERRIDE = AttributeKey.valueOf("LocalAddressOverride");
   private static final Logger log = LoggerFactory.getLogger(ConnectionBase.class);
   private static final int MAX_REGION_SIZE = 1024 * 1024;
 
@@ -67,6 +70,7 @@ public abstract class ConnectionBase {
   private Object metric;
   private SocketAddress remoteAddress;
   private SocketAddress localAddress;
+  private Promise<Void> closePromise;
 
   // State accessed exclusively from the event loop thread
   private boolean read;
@@ -78,6 +82,17 @@ public abstract class ConnectionBase {
     this.chctx = chctx;
     this.context = context;
     this.voidPromise = new VoidChannelPromise(chctx.channel(), false);
+    this.closePromise = context.promise();
+
+    // Add close handler callback
+    closePromise.future().onComplete(this::checkCloseHandler);
+  }
+
+  /**
+   * @return a promise that will be completed when the connection becomes closed
+   */
+  public Future<Void> closeFuture() {
+    return closePromise.future();
   }
 
   /**
@@ -87,11 +102,7 @@ public abstract class ConnectionBase {
    * @param error the {@code Throwable} to propagate
    */
   public void fail(Throwable error) {
-    handler().fail(error);
-  }
-
-  public VertxHandler handler() {
-    return (VertxHandler) chctx.handler();
+    chctx.pipeline().fireExceptionCaught(error);
   }
 
   /**
@@ -120,33 +131,25 @@ public abstract class ConnectionBase {
   /**
    * This method is exclusively called on the event-loop thread
    *
-   * @param msg the messsage to write
-   * @param flush {@code true} to perform a write and flush operation
+   * @param msg the message to write
+   * @param flush a {@code null} {@code flush} value means to flush when there is no read in progress, otherwise it will apply the policy
    * @param promise the promise receiving the completion event
    */
-  private void write(Object msg, boolean flush, ChannelPromise promise) {
+  private void write(Object msg, Boolean flush, ChannelPromise promise) {
     if (METRICS_ENABLED) {
       reportsBytesWritten(msg);
     }
-    needsFlush = !flush;
-    if (flush) {
+    boolean writeAndFlush;
+    if (flush == null) {
+      writeAndFlush = !read;
+    } else {
+      writeAndFlush = flush;
+    }
+    needsFlush = !writeAndFlush;
+    if (writeAndFlush) {
       chctx.writeAndFlush(msg, promise);
     } else {
       chctx.write(msg, promise);
-    }
-  }
-
-  /**
-   * This method is exclusively called on the event-loop thread
-   *
-   * @param promise the promise receiving the completion event
-   */
-  private void writeFlush(ChannelPromise promise) {
-    if (needsFlush) {
-      needsFlush = false;
-      chctx.writeAndFlush(Unpooled.EMPTY_BUFFER, promise);
-    } else {
-      promise.setSuccess();
     }
   }
 
@@ -167,7 +170,7 @@ public abstract class ConnectionBase {
       .addListener((ChannelFutureListener) f -> {
         chctx.channel().close().addListener(promise);
       });
-    writeFlush(channelPromise);
+    writeToChannel(Unpooled.EMPTY_BUFFER, true, channelPromise);
   }
 
   protected void reportsBytesWritten(Object msg) {
@@ -184,26 +187,34 @@ public abstract class ConnectionBase {
   }
 
   public final void writeToChannel(Object msg, ChannelPromise promise) {
+    writeToChannel(msg, false, promise);
+  }
+
+  public final void writeToChannel(Object msg, boolean forceFlush, ChannelPromise promise) {
     synchronized (this) {
       if (!chctx.executor().inEventLoop() || writeInProgress > 0) {
         // Make sure we serialize all the messages as this method can be called from various threads:
         // two "sequential" calls to writeToChannel (we can say that as it is synchronized) should preserve
         // the message order independently of the thread. To achieve this we need to reschedule messages
         // not on the event loop or if there are pending async message for the channel.
-        queueForWrite(msg, promise);
+        queueForWrite(msg, forceFlush, promise);
         return;
       }
     }
     // On the event loop thread
-    write(msg, !read, promise);
+    write(msg, forceFlush ? true : null, promise);
   }
 
-  private void queueForWrite(Object msg, ChannelPromise promise) {
+  private void queueForWrite(Object msg, boolean forceFlush, ChannelPromise promise) {
     writeInProgress++;
     chctx.executor().execute(() -> {
       boolean flush;
-      synchronized (this) {
-        flush = --writeInProgress == 0 && !read;
+      if (forceFlush) {
+        flush = true;
+      } else {
+        synchronized (this) {
+          flush = --writeInProgress == 0;
+        }
       }
       write(msg, flush, promise);
     });
@@ -226,12 +237,7 @@ public abstract class ConnectionBase {
    * @param promise the promise resolved when flush occurred
    */
   public final void flush(ChannelPromise promise) {
-    EventExecutor exec = chctx.executor();
-    if (exec.inEventLoop()) {
-      writeFlush(promise);
-    } else {
-      exec.execute(() -> writeFlush(promise));
-    }
+    writeToChannel(Unpooled.EMPTY_BUFFER, true, promise);
   }
 
   // This is a volatile read inside the Netty channel implementation
@@ -257,7 +263,7 @@ public abstract class ConnectionBase {
    * Close the connection and notifies the {@code handler}
    */
   public final void close(Handler<AsyncResult<Void>> handler) {
-    close().setHandler(handler);
+    close().onComplete(handler);
   }
 
   public synchronized ConnectionBase closeHandler(Handler<Void> handler) {
@@ -340,15 +346,17 @@ public abstract class ConnectionBase {
     if (metrics instanceof TCPMetrics) {
       ((TCPMetrics) metrics).disconnected(metric(), remoteAddress());
     }
-    context.dispatch(null, v -> {
-      Handler<Void> handler;
-      synchronized (ConnectionBase.this) {
-        handler = closeHandler;
-      }
-      if (handler != null) {
-        handler.handle(null);
-      }
-    });
+    closePromise.complete();
+  }
+
+  private void checkCloseHandler(AsyncResult<Void> ar) {
+    Handler<Void> handler;
+    synchronized (ConnectionBase.this) {
+      handler = closeHandler;
+    }
+    if (handler != null) {
+      handler.handle(null);
+    }
   }
 
   /**
@@ -479,11 +487,17 @@ public abstract class ConnectionBase {
   public SocketAddress remoteAddress() {
     SocketAddress address = remoteAddress;
     if (address == null) {
-      java.net.SocketAddress addr = chctx.channel().remoteAddress();
-      if (addr != null) {
-        address = vertx.transport().convert(addr);
-        remoteAddress = address;
+      if (chctx.channel().hasAttr(REMOTE_ADDRESS_OVERRIDE)) {
+        address = chctx.channel().attr(REMOTE_ADDRESS_OVERRIDE).getAndSet(null);
+      } else {
+        java.net.SocketAddress addr = chctx.channel().remoteAddress();
+        if (addr != null) {
+          address = vertx.transport().convert(addr);
+        }
       }
+
+      if (address != null)
+        remoteAddress = address;
     }
     return address;
   }
@@ -491,11 +505,17 @@ public abstract class ConnectionBase {
   public SocketAddress localAddress() {
     SocketAddress address = localAddress;
     if (address == null) {
-      java.net.SocketAddress addr = chctx.channel().localAddress();
-      if (addr != null) {
-        address = vertx.transport().convert(addr);
-        localAddress = address;
+      if (chctx.channel().hasAttr(LOCAL_ADDRESS_OVERRIDE)) {
+        address = chctx.channel().attr(LOCAL_ADDRESS_OVERRIDE).getAndSet(null);
+      } else {
+        java.net.SocketAddress addr = chctx.channel().localAddress();
+        if (addr != null) {
+          address = vertx.transport().convert(addr);
+        }
       }
+
+      if (address != null)
+        localAddress = address;
     }
     return address;
   }

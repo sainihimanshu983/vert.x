@@ -166,7 +166,8 @@ public interface HttpServerRequest extends ReadStream<Buffer> {
   }
 
   /**
-   * @return the remote (client side) address of the request
+   * @return the remote address for this connection, possibly {@code null} (e.g a server bound on a domain socket).
+   * If {@code useProxyProtocol} is set to {@code true}, the address returned will be of the actual connecting client.
    */
   @CacheReturn
   default SocketAddress remoteAddress() {
@@ -174,7 +175,8 @@ public interface HttpServerRequest extends ReadStream<Buffer> {
   }
 
   /**
-   * @return the local (server side) address of the server that handles the request
+   * @return the local address for this connection, possibly {@code null} (e.g a server bound on a domain socket)
+   * If {@code useProxyProtocol} is set to {@code true}, the address returned will be of the proxy.
    */
   @CacheReturn
   default SocketAddress localAddress() {
@@ -232,7 +234,7 @@ public interface HttpServerRequest extends ReadStream<Buffer> {
    * Same as {@link #body()} but with an {@code handler} called when the operation completes
    */
   default HttpServerRequest body(Handler<AsyncResult<Buffer>> handler) {
-    body().setHandler(handler);
+    body().onComplete(handler);
     return this;
   }
 

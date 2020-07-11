@@ -14,7 +14,6 @@ package io.vertx.core.http.impl;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.util.CharsetUtil;
-import io.netty.util.concurrent.FutureListener;
 import io.vertx.codegen.annotations.Nullable;
 import io.vertx.core.AsyncResult;
 import io.vertx.core.Context;
@@ -96,9 +95,9 @@ class VertxHttp2NetSocket<C extends Http2ConnectionBase> extends VertxHttp2Strea
   }
 
   @Override
-  void handleInterestedOpsChanged() {
+  void handleWritabilityChanged(boolean writable) {
     Handler<Void> handler = drainHandler();
-    if (handler != null && !writeQueueFull()) {
+    if (handler != null && writable) {
       handler.handle(null);
     }
   }
@@ -213,7 +212,7 @@ class VertxHttp2NetSocket<C extends Http2ConnectionBase> extends VertxHttp2Strea
   public void write(Buffer data, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = write(data);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
   }
 
@@ -227,7 +226,7 @@ class VertxHttp2NetSocket<C extends Http2ConnectionBase> extends VertxHttp2Strea
   public void write(String str, String enc, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = write(str, enc);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
   }
 
@@ -240,7 +239,7 @@ class VertxHttp2NetSocket<C extends Http2ConnectionBase> extends VertxHttp2Strea
   public void write(String str, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = write(str);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
   }
 
@@ -253,7 +252,7 @@ class VertxHttp2NetSocket<C extends Http2ConnectionBase> extends VertxHttp2Strea
   public void end(Buffer buffer, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = end(buffer);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
   }
 
@@ -266,7 +265,7 @@ class VertxHttp2NetSocket<C extends Http2ConnectionBase> extends VertxHttp2Strea
   public void end(Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = end();
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
   }
 
@@ -294,7 +293,13 @@ class VertxHttp2NetSocket<C extends Http2ConnectionBase> extends VertxHttp2Strea
     resolveFile(filename, offset, length, ar -> {
       if (ar.succeeded()) {
         AsyncFile file = ar.result();
-        file.pipeTo(this, h);
+        file.pipeTo(this, ar1 -> file.close(ar2 -> {
+          Throwable failure = ar1.failed() ? ar1.cause() : ar2.failed() ? ar2.cause() : null;
+          if(failure == null)
+            h.handle(ar1);
+          else
+            h.handle(Future.failedFuture(failure));
+        }));
       } else {
         h.handle(ar.mapEmpty());
       }

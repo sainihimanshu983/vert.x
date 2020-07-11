@@ -120,17 +120,15 @@ public interface HttpClientRequest extends WriteStream<Buffer>, Future<HttpClien
   String query();
 
   /**
-   * Set the request host.<p/>
-   *
    * For HTTP/2 it sets the {@literal :authority} pseudo header otherwise it sets the {@literal Host} header
    */
   @Fluent
-  HttpClientRequest setHost(String host);
+  HttpClientRequest setAuthority(String authority);
 
   /**
    * @return the request host. For HTTP/2 it returns the {@literal :authority} pseudo header otherwise it returns the {@literal Host} header
    */
-  String getHost();
+  String getAuthority();
 
   /**
    * @return The HTTP headers
@@ -323,7 +321,7 @@ public interface HttpClientRequest extends WriteStream<Buffer>, Future<HttpClien
    *   <li>{@link HttpClientRequest#method()}</li>
    *   <li>{@link HttpClientRequest#uri()}</li>
    *   <li>{@link HttpClientRequest#headers()}</li>
-   *   <li>{@link HttpClientRequest#getHost()}</li>
+   *   <li>{@link HttpClientRequest#getAuthority()}</li>
    * </ul>
    *
    * In addition the handler should call the {@link HttpClientRequest#setHandler} method to set an handler to
@@ -353,7 +351,7 @@ public interface HttpClientRequest extends WriteStream<Buffer>, Future<HttpClien
   default HttpClientRequest netSocket(Handler<AsyncResult<NetSocket>> handler) {
     Future<NetSocket> fut = netSocket();
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
     return this;
   }
@@ -389,6 +387,23 @@ public interface HttpClientRequest extends WriteStream<Buffer>, Future<HttpClien
    * @return true when reset has been performed
    */
   boolean reset(long code);
+
+  /**
+   * Reset this request:
+   * <p/>
+   * <ul>
+   *   <li>for HTTP/2, this performs send an HTTP/2 reset frame with the specified error {@code code}</li>
+   *   <li>for HTTP/1.x, this closes the connection when the current request is inflight</li>
+   * </ul>
+   * <p/>
+   * When the request has not yet been sent, the request will be aborted and false is returned as indicator.
+   * <p/>
+   *
+   * @param code the error code
+   * @param cause an optional cause that can be attached to the error code
+   * @return true when reset has been performed
+   */
+  boolean reset(long code, Throwable cause);
 
   /**
    * @return the {@link HttpConnection} associated with this request
@@ -448,8 +463,15 @@ public interface HttpClientRequest extends WriteStream<Buffer>, Future<HttpClien
   StreamPriority getStreamPriority();
 
   @Override
-  default HttpClientRequest setHandler(Handler<AsyncResult<HttpClientResponse>> handler) {
-    onComplete(handler);
-    return this;
+  HttpClientRequest onComplete(Handler<AsyncResult<HttpClientResponse>> handler);
+
+  @Override
+  default HttpClientRequest onSuccess(Handler<HttpClientResponse> handler) {
+    return (HttpClientRequest) Future.super.onSuccess(handler);
+  }
+
+  @Override
+  default HttpClientRequest onFailure(Handler<Throwable> handler) {
+    return (HttpClientRequest) Future.super.onFailure(handler);
   }
 }

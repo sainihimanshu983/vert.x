@@ -94,7 +94,7 @@ public class DatagramSocketImpl implements DatagramSocket, MetricsProvider {
   public DatagramSocket listenMulticastGroup(String multicastAddress, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = listenMulticastGroup(multicastAddress);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
     return this;
   }
@@ -116,7 +116,7 @@ public class DatagramSocketImpl implements DatagramSocket, MetricsProvider {
   public DatagramSocket listenMulticastGroup(String multicastAddress, String networkInterface, String source, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = listenMulticastGroup(multicastAddress, networkInterface, source);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
     return this;
   }
@@ -144,7 +144,7 @@ public class DatagramSocketImpl implements DatagramSocket, MetricsProvider {
   public DatagramSocket unlistenMulticastGroup(String multicastAddress, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = unlistenMulticastGroup(multicastAddress);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
     return this;
   }
@@ -166,7 +166,7 @@ public class DatagramSocketImpl implements DatagramSocket, MetricsProvider {
   public DatagramSocket unlistenMulticastGroup(String multicastAddress, String networkInterface, String source, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = unlistenMulticastGroup(multicastAddress, networkInterface, source);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
     return this;
   }
@@ -194,7 +194,7 @@ public class DatagramSocketImpl implements DatagramSocket, MetricsProvider {
   public DatagramSocket blockMulticastGroup(String multicastAddress, String networkInterface, String sourceToBlock, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = blockMulticastGroup(multicastAddress, networkInterface, sourceToBlock);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
     return  this;
   }
@@ -222,7 +222,7 @@ public class DatagramSocketImpl implements DatagramSocket, MetricsProvider {
   public DatagramSocket blockMulticastGroup(String multicastAddress, String sourceToBlock, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = blockMulticastGroup(multicastAddress, sourceToBlock);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
     return this;
   }
@@ -243,13 +243,13 @@ public class DatagramSocketImpl implements DatagramSocket, MetricsProvider {
   @Override
   public DatagramSocket listen(int port, String address, Handler<AsyncResult<DatagramSocket>> handler) {
     Objects.requireNonNull(handler, "no null handler accepted");
-    listen(new SocketAddressImpl(port, address)).setHandler(handler);
+    listen(SocketAddress.inetSocketAddress(port, address)).onComplete(handler);
     return this;
   }
 
   @Override
   public Future<DatagramSocket> listen(int port, String address) {
-    return listen(new SocketAddressImpl(port, address));
+    return listen(SocketAddress.inetSocketAddress(port, address));
   }
 
   @Override
@@ -329,7 +329,7 @@ public class DatagramSocketImpl implements DatagramSocket, MetricsProvider {
   public DatagramSocket send(Buffer packet, int port, String host, Handler<AsyncResult<Void>> handler) {
     Future<Void> fut = send(packet, port, host);
     if (handler != null) {
-      fut.setHandler(handler);
+      fut.onComplete(handler);
     }
     return this;
   }
@@ -350,7 +350,7 @@ public class DatagramSocketImpl implements DatagramSocket, MetricsProvider {
         if (metrics != null) {
           f2.addListener(fut -> {
             if (fut.isSuccess()) {
-              metrics.bytesWritten(null, new SocketAddressImpl(port, host), packet.length());
+              metrics.bytesWritten(null, SocketAddress.inetSocketAddress(port, host), packet.length());
             }
           });
         }
@@ -391,15 +391,14 @@ public class DatagramSocketImpl implements DatagramSocket, MetricsProvider {
 
   @Override
   public SocketAddress localAddress() {
-    InetSocketAddress addr = channel.localAddress();
-    return new SocketAddressImpl(addr);
+    return context.owner().transport().convert(channel.localAddress());
   }
 
   @Override
   public void close(Handler<AsyncResult<Void>> handler) {
     Future<Void> future = close();
     if (handler != null) {
-      future.setHandler(handler);
+      future.onComplete(handler);
     }
   }
 

@@ -23,7 +23,6 @@ import io.netty.util.AsciiString;
 import io.netty.util.CharsetUtil;
 import io.vertx.core.MultiMap;
 import io.vertx.core.buffer.Buffer;
-import io.vertx.core.http.CaseInsensitiveHeaders;
 import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpServerRequest;
@@ -39,6 +38,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
+import static io.netty.handler.codec.http.HttpHeaderValues.APPLICATION_X_WWW_FORM_URLENCODED;
+import static io.netty.handler.codec.http.HttpHeaderValues.MULTIPART_FORM_DATA;
 import static io.netty.handler.codec.http.HttpResponseStatus.METHOD_NOT_ALLOWED;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 import static io.vertx.core.http.Http2Settings.*;
@@ -378,36 +379,36 @@ public final class HttpUtils {
     if (_ref.getScheme() != null) {
       scheme = _ref.getScheme();
       authority = _ref.getAuthority();
-      path = removeDots(_ref.getPath());
+      path = removeDots(_ref.getRawPath());
       query = _ref.getRawQuery();
     } else {
       if (_ref.getAuthority() != null) {
         authority = _ref.getAuthority();
-        path = _ref.getPath();
+        path = _ref.getRawPath();
         query = _ref.getRawQuery();
       } else {
-        if (_ref.getPath().length() == 0) {
-          path = base.getPath();
+        if (_ref.getRawPath().length() == 0) {
+          path = base.getRawPath();
           if (_ref.getRawQuery() != null) {
             query = _ref.getRawQuery();
           } else {
             query = base.getRawQuery();
           }
         } else {
-          if (_ref.getPath().startsWith("/")) {
-            path = removeDots(_ref.getPath());
+          if (_ref.getRawPath().startsWith("/")) {
+            path = removeDots(_ref.getRawPath());
           } else {
             // Merge paths
             String mergedPath;
-            String basePath = base.getPath();
+            String basePath = base.getRawPath();
             if (base.getAuthority() != null && basePath.length() == 0) {
-              mergedPath = "/" + _ref.getPath();
+              mergedPath = "/" + _ref.getRawPath();
             } else {
               int index = basePath.lastIndexOf('/');
               if (index > -1) {
-                mergedPath = basePath.substring(0, index + 1) + _ref.getPath();
+                mergedPath = basePath.substring(0, index + 1) + _ref.getRawPath();
               } else {
-                mergedPath = _ref.getPath();
+                mergedPath = _ref.getRawPath();
               }
             }
             path = removeDots(mergedPath);
@@ -481,7 +482,7 @@ public final class HttpUtils {
   static MultiMap params(String uri) {
     QueryStringDecoder queryStringDecoder = new QueryStringDecoder(uri);
     Map<String, List<String>> prms = queryStringDecoder.parameters();
-    MultiMap params = new CaseInsensitiveHeaders();
+    MultiMap params = MultiMap.caseInsensitiveMultiMap();
     if (!prms.isEmpty()) {
       for (Map.Entry<String, List<String>> entry: prms.entrySet()) {
         params.add(entry.getKey(), entry.getValue());
@@ -643,6 +644,28 @@ public final class HttpUtils {
     return loc;
   }
 
+  /**
+   * @return convert the {@code sequence} to a lower case instance
+   */
+  public static CharSequence toLowerCase(CharSequence sequence) {
+    StringBuilder buffer = null;
+    int len = sequence.length();
+    for (int index = 0; index < len; index++) {
+      char c = sequence.charAt(index);
+      if (c >= 'A' && c <= 'Z') {
+        if (buffer == null) {
+          buffer = new StringBuilder(sequence);
+        }
+        buffer.setCharAt(index, (char)(c + ('a' - 'A')));
+      }
+    }
+    if (buffer != null) {
+      return buffer.toString();
+    } else {
+      return sequence;
+    }
+  }
+
   private static class CustomCompressor extends HttpContentCompressor {
     @Override
     public ZlibWrapper determineWrapper(String acceptEncoding) {
@@ -731,12 +754,18 @@ public final class HttpUtils {
 
   public static void validateHeader(CharSequence name, CharSequence value) {
     validateHeaderName(name);
-    validateHeaderValue(value);
+    if (value != null) {
+      validateHeaderValue(value);
+    }
   }
 
   public static void validateHeader(CharSequence name, Iterable<? extends CharSequence> values) {
     validateHeaderName(name);
-    values.forEach(HEADER_VALUE_VALIDATOR);
+    values.forEach(value -> {
+      if (value != null) {
+        HEADER_VALUE_VALIDATOR.accept(value);
+      }
+    });
   }
 
   public static void validateHeaderValue(CharSequence seq) {
@@ -828,5 +857,15 @@ public final class HttpUtils {
           }
       }
     }
+  }
+
+  public static boolean isValidMultipartContentType(String contentType) {
+    return MULTIPART_FORM_DATA.regionMatches(true, 0, contentType, 0, MULTIPART_FORM_DATA.length())
+      || APPLICATION_X_WWW_FORM_URLENCODED.regionMatches(true, 0, contentType, 0, APPLICATION_X_WWW_FORM_URLENCODED.length());
+  }
+
+  public static boolean isValidMultipartMethod(HttpMethod method) {
+    return method.equals(HttpMethod.POST) || method.equals(HttpMethod.PUT) || method.equals(HttpMethod.PATCH)
+      || method.equals(HttpMethod.DELETE);
   }
 }

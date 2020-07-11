@@ -13,7 +13,6 @@ package io.vertx.core.http.impl;
 
 import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.HttpHeaders;
-import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.multipart.Attribute;
 import io.netty.handler.codec.http.multipart.HttpPostRequestDecoder;
 import io.netty.handler.codec.http.multipart.InterfaceHttpData;
@@ -26,6 +25,7 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.*;
 import io.vertx.core.http.Cookie;
 import io.vertx.core.http.HttpVersion;
+import io.vertx.core.http.impl.headers.HeadersAdaptor;
 import io.vertx.core.impl.ContextInternal;
 import io.vertx.core.impl.VertxInternal;
 import io.vertx.core.impl.logging.Logger;
@@ -40,8 +40,6 @@ import javax.security.cert.X509Certificate;
 import java.net.URISyntaxException;
 import java.util.Map;
 
-import static io.netty.handler.codec.http.HttpHeaderValues.APPLICATION_X_WWW_FORM_URLENCODED;
-import static io.netty.handler.codec.http.HttpHeaderValues.MULTIPART_FORM_DATA;
 import static io.vertx.core.spi.metrics.Metrics.METRICS_ENABLED;
 
 /**
@@ -207,7 +205,7 @@ public class Http1xServerRequest implements HttpServerRequest {
   @Override
   public io.vertx.core.http.HttpMethod method() {
     if (method == null) {
-      method = io.vertx.core.http.impl.HttpMethodImpl.fromNetty(request.method());
+      method = io.vertx.core.http.HttpMethod.fromNetty(request.method());
     }
     return method;
   }
@@ -392,28 +390,22 @@ public class Http1xServerRequest implements HttpServerRequest {
       if (expect) {
         if (decoder == null) {
           String contentType = request.headers().get(HttpHeaderNames.CONTENT_TYPE);
-          if (contentType != null) {
-            HttpMethod method = request.method();
-            if (isValidMultipartContentType(contentType) && isValidMultipartMethod(method)) {
-              decoder = new HttpPostRequestDecoder(new NettyFileUploadDataFactory(conn.getContext(), this, () -> uploadHandler), request);
-            }
+          if (contentType == null) {
+            throw new IllegalStateException("Request must have a content-type header to decode a multipart request");
           }
+          if (!HttpUtils.isValidMultipartContentType(contentType)) {
+            throw new IllegalStateException("Request must have a valid content-type header to decode a multipart request");
+          }
+          if (!HttpUtils.isValidMultipartMethod(request.method())) {
+            throw new IllegalStateException("Request method must be one of POST, PUT, PATCH or DELETE to decode a multipart request");
+          }
+          decoder = new HttpPostRequestDecoder(new NettyFileUploadDataFactory(conn.getContext(), this, () -> uploadHandler), request);
         }
       } else {
         decoder = null;
       }
       return this;
     }
-  }
-
-  private boolean isValidMultipartContentType(String contentType) {
-    return MULTIPART_FORM_DATA.regionMatches(true, 0, contentType, 0, MULTIPART_FORM_DATA.length())
-      || APPLICATION_X_WWW_FORM_URLENCODED.regionMatches(true, 0, contentType, 0, APPLICATION_X_WWW_FORM_URLENCODED.length());
-  }
-
-  private boolean isValidMultipartMethod(HttpMethod method) {
-    return method.equals(HttpMethod.POST) || method.equals(HttpMethod.PUT) || method.equals(HttpMethod.PATCH)
-      || method.equals(HttpMethod.DELETE);
   }
 
   @Override
@@ -589,7 +581,7 @@ public class Http1xServerRequest implements HttpServerRequest {
   private MultiMap attributes() {
     // Create it lazily
     if (attributes == null) {
-      attributes = new CaseInsensitiveHeaders();
+      attributes = MultiMap.caseInsensitiveMultiMap();
     }
     return attributes;
   }

@@ -26,9 +26,14 @@ import java.util.Objects;
  */
 public class WorkerContext extends ContextImpl {
 
-  WorkerContext(VertxInternal vertx, VertxTracer<?, ?> tracer, WorkerPool internalBlockingPool, WorkerPool workerPool, Deployment deployment,
+  WorkerContext(VertxInternal vertx,
+                VertxTracer<?, ?> tracer,
+                WorkerPool internalBlockingPool,
+                WorkerPool workerPool,
+                Deployment deployment,
+                CloseHooks closeHooks,
                 ClassLoader tccl) {
-    super(vertx, tracer, internalBlockingPool, workerPool, deployment, tccl);
+    super(vertx, tracer, vertx.getEventLoopGroup().next(), internalBlockingPool, workerPool, deployment, closeHooks, tccl);
   }
 
   @Override
@@ -132,6 +137,11 @@ public class WorkerContext extends ContextImpl {
     }
 
     @Override
+    public CloseHooks closeHooks() {
+      return delegate.closeHooks();
+    }
+
+    @Override
     <T> void execute(T argument, Handler<T> task) {
       delegate.execute(this, orderedTasks, argument, task);
     }
@@ -144,6 +154,11 @@ public class WorkerContext extends ContextImpl {
     @Override
     public final <T> Future<T> executeBlockingInternal(Handler<Promise<T>> action) {
       return ContextImpl.executeBlocking(this, action, delegate.internalBlockingPool, delegate.internalOrderedTasks);
+    }
+
+    @Override
+    public <T> Future<T> executeBlockingInternal(Handler<Promise<T>> action, boolean ordered) {
+      return ContextImpl.executeBlocking(this, action, delegate.internalBlockingPool, ordered ? delegate.internalOrderedTasks : null);
     }
 
     @Override

@@ -35,9 +35,24 @@ public class NetServerOptionsConverter {
             obj.setPort(((Number)member.getValue()).intValue());
           }
           break;
+        case "proxyProtocolTimeout":
+          if (member.getValue() instanceof Number) {
+            obj.setProxyProtocolTimeout(((Number)member.getValue()).longValue());
+          }
+          break;
+        case "proxyProtocolTimeoutUnit":
+          if (member.getValue() instanceof String) {
+            obj.setProxyProtocolTimeoutUnit(java.util.concurrent.TimeUnit.valueOf((String)member.getValue()));
+          }
+          break;
         case "sni":
           if (member.getValue() instanceof Boolean) {
             obj.setSni((Boolean)member.getValue());
+          }
+          break;
+        case "useProxyProtocol":
+          if (member.getValue() instanceof Boolean) {
+            obj.setUseProxyProtocol((Boolean)member.getValue());
           }
           break;
       }
@@ -57,6 +72,11 @@ public class NetServerOptionsConverter {
       json.put("host", obj.getHost());
     }
     json.put("port", obj.getPort());
+    json.put("proxyProtocolTimeout", obj.getProxyProtocolTimeout());
+    if (obj.getProxyProtocolTimeoutUnit() != null) {
+      json.put("proxyProtocolTimeoutUnit", obj.getProxyProtocolTimeoutUnit().name());
+    }
     json.put("sni", obj.isSni());
+    json.put("useProxyProtocol", obj.isUseProxyProtocol());
   }
 }

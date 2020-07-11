@@ -15,10 +15,16 @@ package io.vertx.core.impl;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.resolver.AddressResolverGroup;
+import io.vertx.codegen.annotations.Nullable;
 import io.vertx.core.*;
+import io.vertx.core.http.HttpClient;
+import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.impl.HttpServerImpl;
+import io.vertx.core.net.NetClient;
+import io.vertx.core.net.NetClientOptions;
 import io.vertx.core.net.impl.NetServerImpl;
 import io.vertx.core.net.impl.ServerID;
+import io.vertx.core.net.impl.TCPServerBase;
 import io.vertx.core.net.impl.transport.Transport;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.core.spi.metrics.VertxMetrics;
@@ -44,6 +50,10 @@ public interface VertxInternal extends Vertx {
    */
   <T> PromiseInternal<T> promise();
 
+  /**
+   * @return a promise associated with the context returned by {@link #getOrCreateContext()} or the {@code handler}
+   *         if that handler is already an instance of {@code PromiseInternal}
+   */
   <T> PromiseInternal<T> promise(Handler<AsyncResult<T>> handler);
 
   long maxEventLoopExecTime();
@@ -63,9 +73,29 @@ public interface VertxInternal extends Vertx {
 
   Map<ServerID, NetServerImpl> sharedNetServers();
 
+  <S extends TCPServerBase> Map<ServerID, S> sharedTCPServers(Class<S> type);
+
   VertxMetrics metricsSPI();
 
   Transport transport();
+
+  /**
+   * Create a TCP/SSL client using the specified options and close future
+   *
+   * @param options  the options to use
+   * @param closeFuture  the close future
+   * @return the client
+   */
+  NetClient createNetClient(NetClientOptions options, CloseFuture closeFuture);
+
+  /**
+   * Create a HTTP/HTTPS client using the specified options and close future
+   *
+   * @param options  the options to use
+   * @param closeFuture  the close future
+   * @return the client
+   */
+  HttpClient createHttpClient(HttpClientOptions options, CloseFuture closeFuture);
 
   /**
    * Get the current context
@@ -76,14 +106,16 @@ public interface VertxInternal extends Vertx {
   /**
    * @return event loop context
    */
-  ContextInternal createEventLoopContext(Deployment deployment, WorkerPool workerPool, ClassLoader tccl);
+  ContextInternal createEventLoopContext(Deployment deployment, CloseHooks closeHooks, WorkerPool workerPool, ClassLoader tccl);
 
   ContextInternal createEventLoopContext(EventLoop eventLoop, WorkerPool workerPool, ClassLoader tccl);
+
+  ContextInternal createEventLoopContext();
 
   /**
    * @return worker loop context
    */
-  ContextInternal createWorkerContext(Deployment deployment, WorkerPool pool, ClassLoader tccl);
+  ContextInternal createWorkerContext(Deployment deployment, CloseHooks closeHooks, WorkerPool pool, ClassLoader tccl);
 
   ContextInternal createWorkerContext();
 
@@ -109,14 +141,14 @@ public interface VertxInternal extends Vertx {
 
   void failDuringFailover(boolean fail);
 
-  String getNodeID();
-
   File resolveFile(String fileName);
 
   /**
    * Like {@link #executeBlocking(Handler, Handler)} but using the internal worker thread pool.
    */
   <T> void executeBlockingInternal(Handler<Promise<T>> blockingCodeHandler, Handler<AsyncResult<T>> resultHandler);
+
+  <T> void executeBlockingInternal(Handler<Promise<T>> blockingCodeHandler, boolean ordered, Handler<AsyncResult<T>> resultHandler);
 
   ClusterManager getClusterManager();
 

@@ -18,6 +18,7 @@ import io.vertx.core.MultiMap;
 import io.vertx.core.Promise;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.*;
+import io.vertx.core.http.impl.headers.HeadersAdaptor;
 import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
 
@@ -248,7 +249,7 @@ public class HttpClientResponseImpl implements HttpClientResponse  {
     BodyHandler handler = new BodyHandler();
     handler(handler);
     endHandler(handler::handleEnd);
-    handler.promise.future().setHandler(ar -> {
+    handler.promise.future().onComplete(ar -> {
       if (ar.succeeded()) {
         bodyHandler.handle(ar.result());
       }

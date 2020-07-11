@@ -62,7 +62,7 @@ public class MetricsContextTest extends VertxTestBase {
     };
     VertxOptions options = new VertxOptions()
       .setMetricsOptions(new MetricsOptions().setEnabled(true).setFactory(factory))
-      .setEventBusOptions(new EventBusOptions().setClustered(true));
+      .setEventBusOptions(new EventBusOptions());
     clusteredVertx(options, onSuccess(vertx -> {
       assertSame(testThread, metricsThread.get());
       assertNull(metricsContext.get());
@@ -166,11 +166,9 @@ public class MetricsContextTest extends VertxTestBase {
         });
       });
     });
-    client.put(8080, "localhost", "/", onSuccess(resp -> {
+    client.put(8080, "localhost", "/", Buffer.buffer("hello"), onSuccess(resp -> {
       complete();
-    })).exceptionHandler(err -> {
-      fail(err.getMessage());
-    }).setChunked(true).end(Buffer.buffer("hello"));
+    }));
     await();
   }
 
@@ -289,7 +287,7 @@ public class MetricsContextTest extends VertxTestBase {
   private void testHttpClientRequest(Function<Vertx, Context> contextFactory) throws Exception {
     AtomicReference<Thread> expectedThread = new AtomicReference<>();
     AtomicReference<Context> expectedContext = new AtomicReference<>();
-    AtomicBoolean requestBeginCalled = new AtomicBoolean();
+    AtomicReference<String> requestBeginCalled = new AtomicReference();
     AtomicBoolean responseEndCalled = new AtomicBoolean();
     AtomicBoolean socketConnectedCalled = new AtomicBoolean();
     AtomicBoolean socketDisconnectedCalled = new AtomicBoolean();
@@ -301,13 +299,18 @@ public class MetricsContextTest extends VertxTestBase {
       public HttpClientMetrics createHttpClientMetrics(HttpClientOptions options) {
         return new DummyHttpClientMetrics() {
           @Override
-          public Void requestBegin(Void endpointMetric, Void socketMetric, SocketAddress localAddress, SocketAddress remoteAddress, HttpClientRequest request) {
-            requestBeginCalled.set(true);
-            return null;
-          }
-          @Override
-          public void responseEnd(Void requestMetric, HttpClientResponse response) {
-            responseEndCalled.set(true);
+          public ClientMetrics<Void, Void, HttpClientRequest, HttpClientResponse> createEndpointMetrics(SocketAddress remoteAddress, int maxPoolSize) {
+            return new ClientMetrics<Void, Void, HttpClientRequest, HttpClientResponse>() {
+              @Override
+              public Void requestBegin(String uri, HttpClientRequest request) {
+                requestBeginCalled.set(uri);
+                return null;
+              }
+              @Override
+              public void responseEnd(Void requestMetric, HttpClientResponse response) {
+                responseEndCalled.set(true);
+              }
+            };
           }
           @Override
           public Void connected(SocketAddress remoteAddress, String remoteName) {
@@ -357,12 +360,11 @@ public class MetricsContextTest extends VertxTestBase {
       expectedContext.set(Vertx.currentContext());
       HttpClient client = vertx.createHttpClient();
       assertSame(expectedThread.get(), Thread.currentThread());
-      HttpClientRequest req = client.put(8080, "localhost", "/");
-      req.setHandler(resp -> {
+      client.put(8080, "localhost", "/the-uri", Buffer.buffer("hello"), resp -> {
         executeInVanillaThread(() -> {
           client.close();
           vertx.close(v2 -> {
-            assertTrue(requestBeginCalled.get());
+            assertEquals("/the-uri", requestBeginCalled.get());
             assertTrue(responseEndCalled.get());
             assertTrue(socketConnectedCalled.get());
             assertTrue(socketDisconnectedCalled.get());
@@ -373,8 +375,6 @@ public class MetricsContextTest extends VertxTestBase {
           });
         });
       });
-      req.setChunked(true).write("hello");
-      req.end();
     });
     await();
   }
@@ -403,7 +403,12 @@ public class MetricsContextTest extends VertxTestBase {
       public HttpClientMetrics createHttpClientMetrics(HttpClientOptions options) {
         return new DummyHttpClientMetrics() {
           @Override
-          public Void connected(Void endpointMetric, Void socketMetric, WebSocket webSocket) {
+          public ClientMetrics<Void, Void, HttpClientRequest, HttpClientResponse> createEndpointMetrics(SocketAddress remoteAddress, int maxPoolSize) {
+            return new ClientMetrics<Void, Void, HttpClientRequest, HttpClientResponse>() {
+            };
+          }
+          @Override
+          public Void connected(WebSocket webSocket) {
             webSocketConnected.set(true);
             assertTrue(Context.isOnEventLoopThread());
             return null;
@@ -756,12 +761,11 @@ public class MetricsContextTest extends VertxTestBase {
   }
 
   private void testMessageHandler(BiConsumer<Vertx, Handler<Void>> runOnContext) {
-    AtomicReference<Thread> consumerThread = new AtomicReference<>();
-    AtomicReference<Context> consumerContext = new AtomicReference<>();
+    AtomicReference<Thread> scheduleThread = new AtomicReference<>();
+    AtomicReference<Thread> deliveredThread = new AtomicReference<>();
     AtomicBoolean registeredCalled = new AtomicBoolean();
     AtomicBoolean unregisteredCalled = new AtomicBoolean();
-    AtomicBoolean beginHandleCalled = new AtomicBoolean();
-    AtomicBoolean endHandleCalled = new AtomicBoolean();
+    AtomicBoolean messageDelivered = new AtomicBoolean();
     VertxMetricsFactory factory = (options) -> new DummyVertxMetrics() {
       @Override
       public EventBusMetrics createEventBusMetrics() {
@@ -776,87 +780,39 @@ public class MetricsContextTest extends VertxTestBase {
             unregisteredCalled.set(true);
           }
           @Override
-          public void beginHandleMessage(Void handler, boolean local) {
-            consumerThread.set(Thread.currentThread());
-            consumerContext.set(Vertx.currentContext());
-            beginHandleCalled.set(true);
+          public void scheduleMessage(Void handler, boolean local) {
+            scheduleThread.set(Thread.currentThread());
           }
           @Override
-          public void endHandleMessage(Void handler, Throwable failure) {
-            endHandleCalled.set(true);
-            assertSame(consumerThread.get(), Thread.currentThread());
+          public void messageDelivered(Void handler, boolean local) {
+            deliveredThread.set(Thread.currentThread());
           }
         };
       }
     };
     Vertx vertx = vertx(new VertxOptions().setMetricsOptions(new MetricsOptions().setEnabled(true).setFactory(factory)));
     EventBus eb = vertx.eventBus();
+    Thread t = new Thread(() -> {
+      eb.send("the_address", "the_msg");
+    });
     runOnContext.accept(vertx, v -> {
       MessageConsumer<Object> consumer = eb.consumer("the_address");
       consumer.handler(msg -> {
-        assertSame(consumerThread.get(), Thread.currentThread());
+        Thread consumerThread = Thread.currentThread();
         executeInVanillaThread(() -> {
           vertx.getOrCreateContext().runOnContext(v2 -> {
             consumer.unregister(onSuccess(v3 -> {
               assertTrue(registeredCalled.get());
-              assertTrue(beginHandleCalled.get());
-              assertTrue(endHandleCalled.get());
+              assertSame(t, scheduleThread.get());
+              assertSame(consumerThread, deliveredThread.get());
               assertWaitUntil(() -> unregisteredCalled.get());
               testComplete();
             }));
           });
         });
       }).completionHandler(onSuccess(v2 -> {
-        eb.send("the_address", "the_msg");
+        t.start();
       }));
-    });
-    await();
-  }
-
-  @Test
-  public void testDeployEventLoop() {
-    testDeploy(false);
-  }
-
-  @Test
-  public void testDeployWorker() {
-    testDeploy(true);
-  }
-
-  private void testDeploy(boolean worker) {
-    AtomicReference<Thread> verticleThread = new AtomicReference<>();
-    AtomicReference<Context> verticleContext = new AtomicReference<>();
-    AtomicBoolean deployedCalled = new AtomicBoolean();
-    AtomicBoolean undeployedCalled = new AtomicBoolean();
-    VertxMetricsFactory factory = (options) -> new DummyVertxMetrics() {
-      @Override
-      public void verticleDeployed(Verticle verticle) {
-        deployedCalled.set(true);
-        // TODO FIXME
-        // assertTrue(Context.isOnEventLoopThread());
-      }
-      @Override
-      public void verticleUndeployed(Verticle verticle) {
-        undeployedCalled.set(true);
-        // TODO FIXME
-        // assertTrue(Context.isOnEventLoopThread());
-      }
-    };
-    Vertx vertx = vertx(new VertxOptions().setMetricsOptions(new MetricsOptions().setEnabled(true).setFactory(factory)));
-    vertx.deployVerticle(new AbstractVerticle() {
-      @Override
-      public void start() throws Exception {
-        verticleThread.set(Thread.currentThread());
-        verticleContext.set(Vertx.currentContext());
-      }
-    }, new DeploymentOptions().setWorker(worker), ar1 -> {
-      assertTrue(ar1.succeeded());
-      vertx.undeploy(ar1.result(), ar2 -> {
-        assertTrue(ar1.succeeded());
-        assertTrue(deployedCalled.get());
-        assertTrue(undeployedCalled.get());
-        testComplete();
-      });
     });
     await();
   }

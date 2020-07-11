@@ -13,6 +13,7 @@ package io.vertx.core.impl;
 
 import io.netty.channel.EventLoop;
 import io.netty.util.concurrent.FastThreadLocalThread;
+import io.vertx.codegen.annotations.GenIgnore;
 import io.vertx.core.*;
 import io.vertx.core.spi.tracing.VertxTracer;
 
@@ -64,7 +65,8 @@ public interface ContextInternal extends Context, Executor {
   <T> PromiseInternal<T> promise();
 
   /**
-   * @return a {@link Promise} associated with this context
+   * @return a {@link Promise} associated with this context or the {@code handler}
+   *         if that handler is already an instance of {@code PromiseInternal}
    */
   <T> PromiseInternal<T> promise(Handler<AsyncResult<T>> handler);
 
@@ -105,10 +107,17 @@ public interface ContextInternal extends Context, Executor {
    */
   <T> void executeBlockingInternal(Handler<Promise<T>> action, Handler<AsyncResult<T>> resultHandler);
 
+  <T> void executeBlockingInternal(Handler<Promise<T>> action, boolean ordered, Handler<AsyncResult<T>> resultHandler);
+
   /**
    * Like {@link #executeBlockingInternal(Handler, Handler)} but returns a {@code Future} of the asynchronous result
    */
   <T> Future<T> executeBlockingInternal(Handler<Promise<T>> action);
+
+  /**
+   * Like {@link #executeBlockingInternal(Handler, boolean, Handler)} but returns a {@code Future} of the asynchronous result
+   */
+  <T> Future<T> executeBlockingInternal(Handler<Promise<T>> action, boolean ordered);
 
   /**
    * @return the deployment associated with this context or {@code null}
@@ -259,5 +268,29 @@ public interface ContextInternal extends Context, Executor {
    * Like {@link Vertx#setTimer(long, Handler)} except the timer will fire on this context.
    */
   long setTimer(long delay, Handler<Long> handler);
+
+  /**
+   * @return {@code true} when the context is associated with a deployment
+   */
+  boolean isDeployment();
+
+  /**
+   * Add a close hook.
+   *
+   * <p> The {@code hook} will be called when the associated resource needs to be released. Hooks are useful
+   * for automatically cleanup resources when a Verticle is undeployed.
+   *
+   * @param hook the close hook
+   */
+  void addCloseHook(Closeable hook);
+
+  /**
+   * Remove a close hook.
+   *
+   * <p> This is called when the resource is released explicitly and does not need anymore a managed close.
+   *
+   * @param hook the close hook
+   */
+  void removeCloseHook(Closeable hook);
 
 }

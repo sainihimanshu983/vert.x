@@ -12,13 +12,15 @@
 package io.vertx.core;
 
 import io.vertx.core.eventbus.Message;
-import io.vertx.core.impl.*;
+import io.vertx.core.impl.ContextInternal;
+import io.vertx.core.impl.Deployment;
+import io.vertx.core.impl.VertxInternal;
 import io.vertx.core.impl.verticle.CompilingClassLoader;
-import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
-import io.vertx.test.core.*;
-import io.vertx.test.verticles.sourceverticle.SourceVerticle;
+import io.vertx.test.core.TestUtils;
+import io.vertx.test.core.VertxTestBase;
 import io.vertx.test.verticles.*;
+import io.vertx.test.verticles.sourceverticle.SourceVerticle;
 import org.junit.Test;
 
 import java.io.File;
@@ -90,7 +92,6 @@ public class DeploymentTest extends VertxTestBase {
     JsonObject config = new JsonObject().put("foo", "bar");
     Random rand = new Random();
     boolean worker = rand.nextBoolean();
-    boolean multiThreaded = rand.nextBoolean();
     String isolationGroup = TestUtils.randomAlphaString(100);
     boolean ha = rand.nextBoolean();
     List<String> cp = Arrays.asList("foo", "bar");
@@ -146,8 +147,6 @@ public class DeploymentTest extends VertxTestBase {
     JsonObject config = new JsonObject().put("foo", "bar");
     Random rand = new Random();
     boolean worker = rand.nextBoolean();
-    boolean multiThreaded = rand.nextBoolean();
-    String isolationGroup = TestUtils.randomAlphaString(100);
     boolean ha = rand.nextBoolean();
     List<String> cp = Arrays.asList("foo", "bar");
     List<String> isol = Arrays.asList("com.foo.MyClass", "org.foo.*");
@@ -158,22 +157,15 @@ public class DeploymentTest extends VertxTestBase {
     JsonObject json = new JsonObject();
     json.put("config", config);
     json.put("worker", worker);
-    json.put("multiThreaded", multiThreaded);
-    json.put("isolationGroup", isolationGroup);
     json.put("ha", ha);
-    json.put("extraClasspath", new JsonArray(cp));
-    json.put("isolatedClasses", new JsonArray(isol));
     json.put("workerPoolName", poolName);
     json.put("workerPoolSize", poolSize);
     json.put("maxWorkerExecuteTime", maxWorkerExecuteTime);
     json.put("maxWorkerExecuteTimeUnit", maxWorkerExecuteTimeUnit);
     DeploymentOptions options = new DeploymentOptions(json);
     assertEquals(worker, options.isWorker());
-    assertEquals(isolationGroup, options.getIsolationGroup());
     assertEquals("bar", options.getConfig().getString("foo"));
     assertEquals(ha, options.isHa());
-    assertEquals(cp, options.getExtraClasspath());
-    assertEquals(isol, options.getIsolatedClasses());
     assertEquals(poolName, options.getWorkerPoolName());
     assertEquals(poolSize, options.getWorkerPoolSize());
     assertEquals(maxWorkerExecuteTime, options.getMaxWorkerExecuteTime());
@@ -186,8 +178,6 @@ public class DeploymentTest extends VertxTestBase {
     JsonObject config = new JsonObject().put("foo", "bar");
     Random rand = new Random();
     boolean worker = rand.nextBoolean();
-    boolean multiThreaded = rand.nextBoolean();
-    String isolationGroup = TestUtils.randomAlphaString(100);
     boolean ha = rand.nextBoolean();
     List<String> cp = Arrays.asList("foo", "bar");
     List<String> isol = Arrays.asList("com.foo.MyClass", "org.foo.*");
@@ -197,10 +187,7 @@ public class DeploymentTest extends VertxTestBase {
     TimeUnit maxWorkerExecuteTimeUnit = TimeUnit.MILLISECONDS;
     options.setConfig(config);
     options.setWorker(worker);
-    options.setIsolationGroup(isolationGroup);
     options.setHa(ha);
-    options.setExtraClasspath(cp);
-    options.setIsolatedClasses(isol);
     options.setWorkerPoolName(poolName);
     options.setWorkerPoolSize(poolSize);
     options.setMaxWorkerExecuteTime(maxWorkerExecuteTime);
@@ -208,11 +195,8 @@ public class DeploymentTest extends VertxTestBase {
     JsonObject json = options.toJson();
     DeploymentOptions copy = new DeploymentOptions(json);
     assertEquals(worker, copy.isWorker());
-    assertEquals(isolationGroup, copy.getIsolationGroup());
     assertEquals("bar", copy.getConfig().getString("foo"));
     assertEquals(ha, copy.isHa());
-    assertEquals(cp, copy.getExtraClasspath());
-    assertEquals(isol, copy.getIsolatedClasses());
     assertEquals(poolName, copy.getWorkerPoolName());
     assertEquals(poolSize, copy.getWorkerPoolSize());
     assertEquals(maxWorkerExecuteTime, copy.getMaxWorkerExecuteTime());
@@ -1239,7 +1223,7 @@ public class DeploymentTest extends VertxTestBase {
       public void stop(Promise<Void> stopPromise) {
         vertx.deployVerticle(ChildVerticle.class.getName())
           .<Void>mapEmpty()
-          .setHandler(stopPromise);
+          .onComplete(stopPromise);
       }
     }
 
@@ -1489,8 +1473,8 @@ public class DeploymentTest extends VertxTestBase {
     };
     Verticle v = new AbstractVerticle() {
       @Override
-      public void start(Promise<Void> startPromise) throws Exception {
-        this.context.addCloseHook(closeable);
+      public void start(Promise<Void> startPromise) {
+        ((ContextInternal)context).addCloseHook(closeable);
         startPromise.fail("Fail to deploy.");
       }
     };
@@ -1532,10 +1516,6 @@ public class DeploymentTest extends VertxTestBase {
     });
     await();
   }
-
-  // TODO
-
-  // Multi-threaded workers
 
   private void testIsolationGroup(String group1, String group2, int count1, int count2, List<String> isolatedClasses,
                                   String verticleID) throws Exception {

@@ -22,9 +22,10 @@ import io.vertx.core.http.HttpConnection;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpVersion;
 import io.vertx.core.http.StreamPriority;
-import io.vertx.core.http.impl.headers.VertxHttpHeaders;
+import io.vertx.core.http.impl.headers.HeadersMultiMap;
 import io.vertx.core.impl.Arguments;
 import io.vertx.core.impl.ContextInternal;
+import io.vertx.core.impl.PromiseInternal;
 import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
 import io.vertx.core.net.NetSocket;
@@ -55,7 +56,7 @@ public class HttpClientRequestImpl extends HttpClientRequestBase implements Http
   private final Promise<Void> endPromise;
   private final Future<Void> endFuture;
   private boolean chunked;
-  private String hostHeader;
+  private String authority;
   private Handler<Void> continueHandler;
   private Handler<Void> drainHandler;
   private Handler<HttpClientRequest> pushHandler;
@@ -66,15 +67,15 @@ public class HttpClientRequestImpl extends HttpClientRequestBase implements Http
   private List<Handler<AsyncResult<Void>>> pendingHandlers;
   private int pendingMaxSize = -1;
   private int followRedirects;
-  private VertxHttpHeaders headers;
+  private HeadersMultiMap headers;
   private StreamPriority priority;
-  public HttpClientStream stream;
+  private HttpClientStream stream;
   private boolean connecting;
   private Promise<NetSocket> netSocketPromise;
 
-  HttpClientRequestImpl(HttpClientImpl client, ContextInternal context, boolean ssl, HttpMethod method,
-                        SocketAddress server, String host, int port, String relativeURI) {
-    super(client, context, ssl, method, server, host, port, relativeURI);
+  HttpClientRequestImpl(HttpClientImpl client, PromiseInternal<HttpClientResponse> responsePromise, boolean ssl, HttpMethod method,
+                        SocketAddress server, String host, int port, String requestURI) {
+    super(client, responsePromise, ssl, method, server, host, port, requestURI);
     this.chunked = false;
     this.endPromise = context.promise();
     this.endFuture = endPromise.future();
@@ -92,7 +93,8 @@ public class HttpClientRequestImpl extends HttpClientRequestBase implements Http
         return;
       }
     }
-    context.emit(t, handler);
+    // Might be called from non vertx thread
+    context.dispatch(t, handler);
     endPromise.tryFail(t);
   }
 
@@ -150,20 +152,20 @@ public class HttpClientRequestImpl extends HttpClientRequestBase implements Http
   }
 
   @Override
-  public synchronized HttpClientRequest setHost(String host) {
-    this.hostHeader = host;
+  public synchronized HttpClientRequest setAuthority(String authority) {
+    this.authority = authority;
     return this;
   }
 
   @Override
-  public synchronized String getHost() {
-    return hostHeader;
+  public synchronized String getAuthority() {
+    return authority;
   }
 
   @Override
   public synchronized MultiMap headers() {
     if (headers == null) {
-      headers = new VertxHttpHeaders();
+      headers = HeadersMultiMap.httpHeaders();
     }
     return headers;
   }
@@ -194,8 +196,7 @@ public class HttpClientRequestImpl extends HttpClientRequestBase implements Http
   }
 
   @Override
-  public synchronized boolean writeQueueFull() {
-    checkEnded();
+  public boolean writeQueueFull() {
     synchronized (this) {
       checkEnded();
       if (stream == null) {
@@ -329,19 +330,19 @@ public class HttpClientRequestImpl extends HttpClientRequestBase implements Http
     context.emit(handler);
   }
 
-  private void handleNextRequest(HttpClientRequest next, long timeoutMs) {
-    next.setHandler(responsePromise.future().getHandler());
+  private void handleNextRequest(HttpClientRequest next, Handler<AsyncResult<HttpClientResponse>> handler, long timeoutMs) {
+    next.onComplete(handler);
     next.exceptionHandler(exceptionHandler());
     exceptionHandler(null);
     next.pushHandler(pushHandler);
     next.setMaxRedirects(followRedirects - 1);
-    if (next.getHost() == null) {
-      next.setHost(hostHeader);
+    if (next.getAuthority() == null) {
+      next.setAuthority(authority);
     }
     if (headers != null) {
       next.headers().addAll(headers);
     }
-    endFuture.setHandler(ar -> {
+    endFuture.onComplete(ar -> {
       if (ar.succeeded()) {
         if (timeoutMs > 0) {
           next.setTimeout(timeoutMs);
@@ -363,40 +364,47 @@ public class HttpClientRequestImpl extends HttpClientRequestBase implements Http
     }
   }
 
-  void handleResponse(HttpClientResponse resp, long timeoutMs) {
-    if (reset == null) {
-      int statusCode = resp.statusCode();
-      if (followRedirects > 0 && statusCode >= 300 && statusCode < 400) {
-        Future<HttpClientRequest> next = client.redirectHandler().apply(resp);
-        if (next != null) {
-          next.setHandler(ar -> {
-            if (ar.succeeded()) {
-              handleNextRequest(ar.result(), timeoutMs);
-            } else {
-              responsePromise.fail(ar.cause());
-            }
-          });
-          return;
-        }
-      }
-      responsePromise.complete(resp);
+  void handleResponse(Promise<HttpClientResponse> promise, HttpClientResponse resp, long timeoutMs) {
+    if (reset != null) {
+      return;
     }
+    int statusCode = resp.statusCode();
+    if (followRedirects > 0 && statusCode >= 300 && statusCode < 400) {
+      ContextInternal prev = context.emitBegin();
+      Future<HttpClientRequest> next;
+      try {
+        next = client.redirectHandler().apply(resp);
+      } finally {
+        context.emitEnd(prev);
+      }
+      if (next != null) {
+        next.onComplete(ar -> {
+          if (ar.succeeded()) {
+            handleNextRequest(ar.result(), promise, timeoutMs);
+          } else {
+            fail(ar.cause());
+          }
+        });
+        return;
+      }
+    }
+    promise.complete(resp);
   }
 
   @Override
-  protected String hostHeader() {
-    return hostHeader != null ? hostHeader : super.hostHeader();
+  protected String authority() {
+    return authority != null ? authority : super.authority();
   }
 
   private synchronized void connect(Handler<AsyncResult<HttpVersion>> headersHandler) {
     if (!connecting) {
       SocketAddress peerAddress;
-      if (hostHeader != null) {
-        int idx = hostHeader.lastIndexOf(':');
+      if (authority != null) {
+        int idx = authority.lastIndexOf(':');
         if (idx != -1) {
-          peerAddress = SocketAddress.inetSocketAddress(Integer.parseInt(hostHeader.substring(idx + 1)), hostHeader.substring(0, idx));
+          peerAddress = SocketAddress.inetSocketAddress(Integer.parseInt(authority.substring(idx + 1)), authority.substring(0, idx));
         } else {
-          peerAddress = SocketAddress.inetSocketAddress(80, hostHeader);
+          peerAddress = SocketAddress.inetSocketAddress(80, authority);
         }
       } else {
         String peerHost = host;
@@ -460,7 +468,7 @@ public class HttpClientRequestImpl extends HttpClientRequestBase implements Http
           }
         };
       }
-      stream.writeHead(method, uri, headers, hostHeader(), chunked, pending, ended, priority, handler);
+      stream.writeHead(method, uri, headers, authority(), chunked, pending, ended, priority, handler);
       if (ended) {
         tryComplete();
       }
@@ -620,9 +628,11 @@ public class HttpClientRequestImpl extends HttpClientRequestBase implements Http
   }
 
   private void checkResponseHandler() {
+/*
     if (stream == null && !connecting && responsePromise.future().getHandler() == null) {
       throw new IllegalStateException("You must set a response handler before connecting to the server");
     }
+*/
   }
 
   synchronized Handler<HttpClientRequest> pushHandler() {

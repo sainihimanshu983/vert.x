@@ -36,10 +36,7 @@ import java.nio.file.Files;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
-import static junit.framework.TestCase.fail;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
 
 public class VertxFactoryTest {
 
@@ -70,17 +67,6 @@ public class VertxFactoryTest {
   }
 
   @Test
-  public void testCreateClusteredSync() {
-    VertxFactory factory = new VertxFactory(new VertxOptions().setClustered(true));
-    try {
-      factory.vertx();
-      fail();
-    } catch (IllegalArgumentException ignore) {
-      // Expected
-    }
-  }
-
-  @Test
   public void testFactoryMetricsOverridesMetaInf() {
     runWithServiceFromMetaInf(VertxMetricsFactory.class, FakeVertxMetrics.class.getName(), () -> {
       FakeVertxMetrics metrics = new FakeVertxMetrics();
@@ -108,7 +94,7 @@ public class VertxFactoryTest {
   public void testFactoryTracerOverridesMetaInf() {
     runWithServiceFromMetaInf(VertxTracerFactory.class, FakeTracerFactory.class.getName(), () -> {
       FakeTracer tracer = new FakeTracer();
-      TracingOptions tracingOptions = new TracingOptions().setEnabled(true);
+      TracingOptions tracingOptions = new TracingOptions();
       VertxFactory factory = new VertxFactory(new VertxOptions().setTracingOptions(tracingOptions));
       factory.tracer(tracer);
       Vertx vertx = factory.vertx();
@@ -119,7 +105,7 @@ public class VertxFactoryTest {
   @Test
   public void testFactoryTracerFactoryOverridesOptions() {
     FakeTracer tracer = new FakeTracer();
-    TracingOptions tracingOptions = new TracingOptions().setEnabled(true).setFactory(new VertxTracerFactory() {
+    TracingOptions tracingOptions = new TracingOptions().setFactory(new VertxTracerFactory() {
       @Override
       public VertxTracer tracer(TracingOptions options) {
         throw new AssertionError();
@@ -136,7 +122,7 @@ public class VertxFactoryTest {
     FakeClusterManager clusterManager = new FakeClusterManager();
     CompletableFuture<Vertx> res = new CompletableFuture<>();
     runWithServiceFromMetaInf(ClusterManager.class, FakeClusterManager.class.getName(), () -> {
-      VertxFactory factory = new VertxFactory(new VertxOptions().setClustered(true));
+      VertxFactory factory = new VertxFactory(new VertxOptions());
       factory.clusterManager(clusterManager);
       factory.clusteredVertx(ar -> {
         if (ar.succeeded()) {

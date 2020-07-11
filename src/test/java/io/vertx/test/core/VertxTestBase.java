@@ -42,6 +42,9 @@ public class VertxTestBase extends AsyncTestBase {
   @Rule
   public RepeatRule repeatRule = new RepeatRule();
 
+  @Rule
+  public FileDescriptorLeakDetectorRule fileDescriptorLeakDetectorRule = new FileDescriptorLeakDetectorRule();
+
   protected Vertx vertx;
 
   protected Vertx[] vertices;
@@ -74,7 +77,7 @@ public class VertxTestBase extends AsyncTestBase {
     options.setPreferNativeTransport(USE_NATIVE_TRANSPORT);
     VertxTracer tracer = getTracer();
     if (tracer != null) {
-      options.setTracingOptions(new TracingOptions().setEnabled(true).setFactory(opts -> tracer));
+      options.setTracingOptions(new TracingOptions().setFactory(opts -> tracer));
     }
     return options;
   }
@@ -160,7 +163,7 @@ public class VertxTestBase extends AsyncTestBase {
     for (int i = 0; i < numNodes; i++) {
       int index = i;
       options[i].setClusterManager(getClusterManager())
-        .getEventBusOptions().setHost("localhost").setPort(0).setClustered(true);
+        .getEventBusOptions().setHost("localhost").setPort(0);
       clusteredVertx(options[i], ar -> {
           try {
             if (ar.failed()) {

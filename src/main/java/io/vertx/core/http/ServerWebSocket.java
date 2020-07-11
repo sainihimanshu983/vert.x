@@ -11,14 +11,12 @@
 
 package io.vertx.core.http;
 
-import io.vertx.codegen.annotations.CacheReturn;
 import io.vertx.codegen.annotations.GenIgnore;
 import io.vertx.codegen.annotations.Nullable;
 import io.vertx.codegen.annotations.VertxGen;
 import io.vertx.core.AsyncResult;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
-import io.vertx.core.MultiMap;
 import io.vertx.core.Promise;
 import io.vertx.core.buffer.Buffer;
 
@@ -81,6 +79,18 @@ public interface ServerWebSocket extends WebSocketBase {
 
   @Override
   ServerWebSocket frameHandler(Handler<WebSocketFrame> handler);
+
+  /**
+   * @return the WebSocket handshake scheme
+   */
+  @Nullable
+  String scheme();
+
+  /**
+   * @return the WebSocket handshake host
+   */
+  @Nullable
+  String host();
 
   /*
    * @return the WebSocket handshake URI. This is a relative URI.

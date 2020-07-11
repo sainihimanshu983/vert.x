@@ -15,15 +15,10 @@ import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.dns.AddressResolverOptions;
 import io.vertx.core.file.FileSystem;
-import io.vertx.core.http.HttpClient;
-import io.vertx.core.http.HttpMethod;
-import io.vertx.core.http.HttpServer;
-import io.vertx.core.http.HttpServerOptions;
-import io.vertx.core.http.HttpServerRequest;
-import io.vertx.core.http.HttpServerResponse;
-import io.vertx.core.json.JsonObject;
+import io.vertx.core.http.*;
 import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
+import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.NetClient;
 import io.vertx.core.net.NetServer;
 import io.vertx.core.net.SocketAddress;
@@ -120,7 +115,7 @@ public class CoreExamples {
 
     Future<NetServer> netServerFuture = Future.future(promise -> netServer.listen(promise));
 
-    CompositeFuture.all(httpServerFuture, netServerFuture).setHandler(ar -> {
+    CompositeFuture.all(httpServerFuture, netServerFuture).onComplete(ar -> {
       if (ar.succeeded()) {
         // All servers started
       } else {
@@ -134,7 +129,7 @@ public class CoreExamples {
   }
 
   public void exampleFutureAny1(Future<String> future1, Future<String> future2) {
-    CompositeFuture.any(future1, future2).setHandler(ar -> {
+    CompositeFuture.any(future1, future2).onComplete(ar -> {
       if (ar.succeeded()) {
         // At least one is succeeded
       } else {
@@ -148,7 +143,7 @@ public class CoreExamples {
   }
 
   public void exampleFutureJoin1(Future future1, Future future2, Future future3) {
-    CompositeFuture.join(future1, future2, future3).setHandler(ar -> {
+    CompositeFuture.join(future1, future2, future3).onComplete(ar -> {
       if (ar.succeeded()) {
         // All succeeded
       } else {
@@ -181,26 +176,6 @@ public class CoreExamples {
   public void example7_1(Vertx vertx) {
     DeploymentOptions options = new DeploymentOptions().setWorker(true);
     vertx.deployVerticle("com.mycompany.MyOrderProcessorVerticle", options);
-  }
-
-  public void multiThreadedWorkerVerticleAlternative(Vertx vertx) {
-    DeploymentOptions options = new DeploymentOptions()
-      .setWorker(true)
-      .setInstances(5) // matches the worker pool size below
-      .setWorkerPoolName("the-specific-pool")
-      .setWorkerPoolSize(5);
-    vertx.deployVerticle("com.mycompany.MyOrderProcessorVerticle", options);
-  }
-
-  public void multiThreadedWorkerVerticleAlternative2(Vertx vertx, String someresult) {
-    vertx.eventBus().consumer("foo", msg -> {
-      vertx.executeBlocking(promise -> {
-        // Invoke blocking code with received message data
-        promise.complete(someresult);
-      }, false, ar -> { // ordered == false
-        // Handle result, e.g. reply to the message
-      });
-    });
   }
 
   public void example8(Vertx vertx) {
@@ -260,13 +235,6 @@ public class CoreExamples {
     JsonObject config = new JsonObject().put("name", "tim").put("directory", "/blah");
     DeploymentOptions options = new DeploymentOptions().setConfig(config);
     vertx.deployVerticle("com.mycompany.MyOrderProcessorVerticle", options);
-  }
-
-  public void example14(Vertx vertx) {
-    DeploymentOptions options = new DeploymentOptions().setIsolationGroup("mygroup");
-    options.setIsolatedClasses(Arrays.asList("com.mycompany.myverticle.*",
-                       "com.mycompany.somepkg.SomeClass", "org.somelibrary.*"));
-    vertx.deployVerticle("com.mycompany.myverticle.VerticleClass", options);
   }
 
   public void example15(Vertx vertx) {
@@ -430,8 +398,9 @@ public class CoreExamples {
     SocketAddress addr = SocketAddress.domainSocketAddress("/var/tmp/myservice.sock");
 
     // Send request to the server
-    httpClient.request(HttpMethod.GET, addr, 8080, "localhost", "/", resp -> {
-      // Process response
-    }).end();
+    httpClient.request(HttpMethod.GET, addr, 8080, "localhost", "/")
+      .onComplete(resp -> {
+        // Process response
+      }).end();
   }
 }

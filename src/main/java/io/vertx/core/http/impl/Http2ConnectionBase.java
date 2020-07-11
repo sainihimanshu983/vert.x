@@ -12,6 +12,7 @@
 package io.vertx.core.http.impl;
 
 import io.netty.buffer.*;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
@@ -152,31 +153,23 @@ abstract class Http2ConnectionBase extends ConnectionBase implements Http2FrameL
   void onStreamError(int streamId, Throwable cause) {
     VertxHttp2Stream stream = stream(streamId);
     if (stream != null) {
-      onStreamError(stream, cause);
+      stream.onError(cause);
     }
-  }
-
-  void onStreamError(VertxHttp2Stream stream, Throwable cause) {
-    stream.context.emit(v -> stream.handleException(cause));
   }
 
   void onStreamWritabilityChanged(Http2Stream s) {
     VertxHttp2Stream stream = s.getProperty(streamKey);
     if (stream != null) {
-      stream.context.emit(v -> stream.onWritabilityChanged());
+      stream.onWritabilityChanged();
     }
   }
 
-  void onStreamClosed(Http2Stream stream) {
-    VertxHttp2Stream removed = stream.getProperty(streamKey);
-    if (removed != null) {
-      onStreamClosed(removed);
+  void onStreamClosed(Http2Stream s) {
+    VertxHttp2Stream stream = s.getProperty(streamKey);
+    if (stream != null) {
+      stream.onClose();
     }
     checkShutdownHandler();
-  }
-
-  protected void onStreamClosed(VertxHttp2Stream stream) {
-    stream.onClose();
   }
 
   boolean onGoAwaySent(int lastStreamId, long errorCode, ByteBuf debugData) {
@@ -385,18 +378,25 @@ abstract class Http2ConnectionBase extends ConnectionBase implements Http2FrameL
   }
 
   @Override
-  public HttpConnection shutdown(long timeout) {
-    if (timeout < 0) {
-      throw new IllegalArgumentException("Invalid timeout value " + timeout);
-    }
-    handler.gracefulShutdownTimeoutMillis(timeout);
-    channel().close();
-    return this;
+  public void shutdown(long timeout, Handler<AsyncResult<Void>> handler) {
+    shutdown(timeout, vertx.promise(handler));
   }
 
   @Override
-  public HttpConnection shutdown() {
-    return shutdown(30000);
+  public Future<Void> shutdown(long timeoutMs) {
+    PromiseInternal<Void> promise = vertx.promise();
+    shutdown(timeoutMs, promise);
+    return promise.future();
+  }
+
+  private void shutdown(long timeout, PromiseInternal<Void> promise) {
+    if (timeout < 0) {
+      promise.fail("Invalid timeout value " + timeout);
+      return;
+    }
+    handler.gracefulShutdownTimeoutMillis(timeout);
+    ChannelFuture fut = channel().close();
+    fut.addListener(promise);
   }
 
   @Override
@@ -439,7 +439,7 @@ abstract class Http2ConnectionBase extends ConnectionBase implements Http2FrameL
 
   @Override
   public HttpConnection updateSettings(io.vertx.core.http.Http2Settings settings, @Nullable Handler<AsyncResult<Void>> completionHandler) {
-    updateSettings(settings).setHandler(completionHandler);
+    updateSettings(settings).onComplete(completionHandler);
     return this;
   }
 
@@ -494,7 +494,7 @@ abstract class Http2ConnectionBase extends ConnectionBase implements Http2FrameL
   public HttpConnection ping(Buffer data, Handler<AsyncResult<Buffer>> pongHandler) {
     Future<Buffer> fut = ping(data);
     if (pongHandler != null) {
-      fut.setHandler(pongHandler);
+      fut.onComplete(pongHandler);
     }
     return this;
   }

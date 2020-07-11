@@ -93,7 +93,7 @@ public interface EventBus extends Measured {
   @Fluent
   default <T> EventBus request(String address, @Nullable Object message, DeliveryOptions options, Handler<AsyncResult<Message<T>>> replyHandler) {
     Future<Message<T>> reply = request(address, message, options);
-    reply.setHandler(replyHandler);
+    reply.onComplete(replyHandler);
     return this;
   }
 
@@ -255,22 +255,6 @@ public interface EventBus extends Measured {
    */
   @GenIgnore
   EventBus unregisterDefaultCodec(Class clazz);
-
-  /**
-   * Start the event bus. This would not normally be called in user code
-   *
-   * @param completionHandler  handler will be called when event bus is started
-   */
-  @GenIgnore
-  void start(Handler<AsyncResult<Void>> completionHandler);
-
-  /**
-   * Close the event bus and release any resources held. This would not normally be called in user code
-   *
-   * @param completionHandler may be {@code null}
-   */
-  @GenIgnore
-  void close(Handler<AsyncResult<Void>> completionHandler);
 
   /**
    * Add an interceptor that will be called whenever a message is sent from Vert.x

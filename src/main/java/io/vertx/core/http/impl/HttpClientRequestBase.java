@@ -12,7 +12,6 @@
 package io.vertx.core.http.impl;
 
 import io.vertx.core.AsyncResult;
-import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
 import io.vertx.core.http.HttpClientRequest;
@@ -20,6 +19,7 @@ import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.StreamResetException;
 import io.vertx.core.impl.ContextInternal;
+import io.vertx.core.impl.PromiseInternal;
 import io.vertx.core.net.SocketAddress;
 
 /**
@@ -31,32 +31,30 @@ public abstract class HttpClientRequestBase implements HttpClientRequest {
   protected final ContextInternal context;
   protected final io.vertx.core.http.HttpMethod method;
   protected final String uri;
-  protected final String path;
-  protected final String query;
   protected final String host;
   protected final int port;
   protected final SocketAddress server;
   protected final boolean ssl;
-  protected final Promise<HttpClientResponse> responsePromise;
+  private String path;
+  private String query;
+  private final PromiseInternal<HttpClientResponse> responsePromise;
   private long currentTimeoutTimerId = -1;
   private long currentTimeoutMs;
   private long lastDataReceived;
 
-  HttpClientRequestBase(HttpClientImpl client, ContextInternal context, boolean ssl, HttpMethod method, SocketAddress server, String host, int port, String uri) {
+  HttpClientRequestBase(HttpClientImpl client, PromiseInternal<HttpClientResponse> responsePromise, boolean ssl, HttpMethod method, SocketAddress server, String host, int port, String uri) {
     this.client = client;
-    this.context = context;
+    this.responsePromise = responsePromise;
+    this.context = (ContextInternal) responsePromise.future().context();
     this.uri = uri;
     this.method = method;
     this.server = server;
     this.host = host;
     this.port = port;
-    this.path = uri.length() > 0 ? HttpUtils.parsePath(uri) : "";
-    this.query = HttpUtils.parseQuery(uri);
     this.ssl = ssl;
-    this.responsePromise = context.promise();
   }
 
-  protected String hostHeader() {
+  protected String authority() {
     if ((port == 80 && !ssl) || (port == 443 && ssl)) {
       return host;
     } else {
@@ -66,14 +64,21 @@ public abstract class HttpClientRequestBase implements HttpClientRequest {
 
   @Override
   public String absoluteURI() {
-    return (ssl ? "https://" : "http://") + hostHeader() + uri;
+    return (ssl ? "https://" : "http://") + authority() + uri;
   }
 
   public String query() {
+    if (query == null) {
+      query = HttpUtils.parseQuery(uri);
+
+    }
     return query;
   }
 
   public String path() {
+    if (path == null) {
+      path = uri.length() > 0 ? HttpUtils.parsePath(uri) : "";
+    }
     return path;
   }
 
@@ -99,6 +104,10 @@ public abstract class HttpClientRequestBase implements HttpClientRequest {
   }
 
   void handleException(Throwable t) {
+    fail(t);
+  }
+
+  void fail(Throwable t) {
     cancelTimeout();
     responsePromise.tryFail(t);
     HttpClientResponseImpl response = (HttpClientResponseImpl) responsePromise.future().result();
@@ -108,18 +117,10 @@ public abstract class HttpClientRequestBase implements HttpClientRequest {
   }
 
   void handleResponse(HttpClientResponse resp) {
-    long timeoutMS;
-    synchronized (this) {
-      timeoutMS = cancelTimeout();
-    }
-    try {
-      handleResponse(resp, timeoutMS);
-    } catch (Throwable t) {
-      handleException(t);
-    }
+    handleResponse(responsePromise, resp, cancelTimeout());
   }
 
-  abstract void handleResponse(HttpClientResponse resp, long timeoutMs);
+  abstract void handleResponse(Promise<HttpClientResponse> promise, HttpClientResponse resp, long timeoutMs);
 
   private synchronized long cancelTimeout() {
     long ret;
@@ -160,22 +161,22 @@ public abstract class HttpClientRequestBase implements HttpClientRequest {
     return reset(new StreamResetException(code));
   }
 
+  @Override
+  public boolean reset(long code, Throwable cause) {
+    return reset(new StreamResetException(code, cause));
+  }
+
   abstract boolean reset(Throwable cause);
 
   @Override
   public HttpClientRequest onComplete(Handler<AsyncResult<HttpClientResponse>> handler) {
-    responsePromise.future().setHandler(handler);
+    responsePromise.future().onComplete(handler);
     return this;
   }
 
   @Override
   public boolean isComplete() {
     return responsePromise.future().isComplete();
-  }
-
-  @Override
-  public Handler<AsyncResult<HttpClientResponse>> getHandler() {
-    return responsePromise.future().getHandler();
   }
 
   @Override

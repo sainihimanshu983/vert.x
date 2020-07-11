@@ -14,6 +14,7 @@ package io.vertx.core.json.jackson;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.JsonTokenId;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.netty.buffer.ByteBuf;
@@ -78,11 +79,11 @@ public class JacksonCodec implements JsonCodec {
 
   @Override
   public <T> T fromValue(Object json, Class<T> toValueType) {
-    throw new UnsupportedOperationException("Mapping is not available without Jackson Databind on the classpath");
+    throw new DecodeException("Mapping " + toValueType.getName() + "  is not available without Jackson Databind on the classpath");
   }
 
   public <T> T fromValue(Object json, TypeReference<T> type) {
-    throw new UnsupportedOperationException("Mapping is not available without Jackson Databind on the classpath");
+    throw new DecodeException("Mapping " + type.getType().getTypeName() + " is not available without Jackson Databind on the classpath");
   }
 
   @Override
@@ -165,15 +166,21 @@ public class JacksonCodec implements JsonCodec {
   }
 
   public static <T> T fromParser(JsonParser parser, Class<T> type) throws DecodeException {
+    Object res;
+    JsonToken remaining;
     try {
       parser.nextToken();
-      Object res = parseAny(parser);
-      return cast(res, type);
+      res = parseAny(parser);
+      remaining = parser.nextToken();
     } catch (IOException e) {
       throw new DecodeException(e.getMessage(), e);
     } finally {
       close(parser);
     }
+    if (remaining != null) {
+      throw new DecodeException("Unexpected trailing token");
+    }
+    return cast(res, type);
   }
 
   private static Object parseAny(JsonParser parser) throws IOException, DecodeException {
@@ -296,7 +303,7 @@ public class JacksonCodec implements JsonCodec {
         } else if (json instanceof BigDecimal) {
           generator.writeNumber((BigDecimal) json);
         } else {
-          throw new UnsupportedOperationException();
+          generator.writeNumber(((Number) json).doubleValue());
         }
       } else if (json instanceof Boolean) {
         generator.writeBoolean((Boolean)json);
@@ -306,13 +313,16 @@ public class JacksonCodec implements JsonCodec {
       } else if (json instanceof byte[]) {
         // RFC-7493
         generator.writeString(BASE64_ENCODER.encodeToString((byte[]) json));
+      } else if (json instanceof Buffer) {
+        // RFC-7493
+        generator.writeString(BASE64_ENCODER.encodeToString(((Buffer) json).getBytes()));
       } else if (json instanceof Enum) {
         // vert.x extra (non standard but allowed conversion)
         generator.writeString(((Enum<?>) json).name());
       } else if (json == null) {
         generator.writeNull();
       } else {
-        throw new UnsupportedOperationException();
+        throw new EncodeException("Mapping " + json.getClass().getName() + "  is not available without Jackson Databind on the classpath");
       }
     } catch (IOException e) {
       throw new EncodeException(e.getMessage(), e);
