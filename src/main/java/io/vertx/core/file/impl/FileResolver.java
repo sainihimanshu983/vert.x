@@ -20,18 +20,11 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
-import java.nio.file.FileAlreadyExistsException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Enumeration;
-import java.util.UUID;
-import java.util.function.IntPredicate;
-import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
-import static io.vertx.core.net.impl.URIDecoder.*;
+import static io.vertx.core.net.impl.URIDecoder.decodeURIComponent;
 
 /**
  * Sometimes the file resources of an application are bundled into jars, or are somewhere on the classpath but not
@@ -49,59 +42,33 @@ import static io.vertx.core.net.impl.URIDecoder.*;
  */
 public class FileResolver {
 
-  /**
-   * Predicate for checking validity of cache path.
-   */
-  private static final IntPredicate CACHE_PATH_CHECKER;
-
-  static {
-    if (PlatformDependent.isWindows()) {
-      CACHE_PATH_CHECKER = c -> {
-        if (c < 33) {
-          return false;
-        } else {
-          switch (c) {
-            case 34:
-            case 42:
-            case 58:
-            case 60:
-            case 62:
-            case 63:
-            case 124:
-              return false;
-            default:
-              return true;
-          }
-        }
-      };
-    } else {
-      CACHE_PATH_CHECKER = c -> c != '\u0000';
-    }
-  }
-
   public static final String DISABLE_FILE_CACHING_PROP_NAME = "vertx.disableFileCaching";
   public static final String DISABLE_CP_RESOLVING_PROP_NAME = "vertx.disableFileCPResolving";
   public static final String CACHE_DIR_BASE_PROP_NAME = "vertx.cacheDirBase";
+
   private static final String FILE_SEP = System.getProperty("file.separator");
   private static final boolean NON_UNIX_FILE_SEP = !FILE_SEP.equals("/");
-  private static final String JAR_URL_SEP = "!/";
-  private static final Pattern JAR_URL_SEP_PATTERN = Pattern.compile(JAR_URL_SEP);
 
   private final File cwd;
-  private File cacheDir;
-  private Thread shutdownHook;
   private final boolean enableCaching;
-  private final boolean enableCpResolving;
-  private final String fileCacheDir;
+  private final boolean closeCache;
+  private final FileCache cache;
 
   public FileResolver() {
     this(new FileSystemOptions());
   }
 
   public FileResolver(FileSystemOptions fileSystemOptions) {
-    this.enableCaching = fileSystemOptions.isFileCachingEnabled();
-    this.enableCpResolving = fileSystemOptions.isClassPathResolvingEnabled();
-    this.fileCacheDir = fileSystemOptions.getFileCacheDir();
+    this(
+      fileSystemOptions.isFileCachingEnabled(),
+      fileSystemOptions.isClassPathResolvingEnabled() ? FileCache.setupCache(fileSystemOptions.getFileCacheDir()) : null,
+      fileSystemOptions.isClassPathResolvingEnabled());
+  }
+
+  public FileResolver(boolean enableCaching, FileCache cache, boolean closeCache) {
+    this.enableCaching = enableCaching;
+    this.cache = cache;
+    this.closeCache = closeCache;
 
     String cwdOverride = System.getProperty("vertx.cwd");
     if (cwdOverride != null) {
@@ -109,25 +76,15 @@ public class FileResolver {
     } else {
       cwd = null;
     }
-    if (this.enableCpResolving) {
-      setupCacheDir(UUID.randomUUID().toString());
-    }
   }
 
   /**
    * Close this file resolver, this is a blocking operation.
    */
   public void close() throws IOException {
-    synchronized (this) {
-      if (shutdownHook != null) {
-        // May throw IllegalStateException if called from other shutdown hook so ignore that
-        try {
-          Runtime.getRuntime().removeShutdownHook(shutdownHook);
-        } catch (IllegalStateException ignore) {
-        }
-      }
+    if (closeCache) {
+      cache.close();
     }
-    deleteCacheDir();
   }
 
   public File resolveFile(String fileName) {
@@ -136,23 +93,20 @@ public class FileResolver {
     if (cwd != null && !file.isAbsolute()) {
       file = new File(cwd, fileName);
     }
-    if (!this.enableCpResolving) {
+    if (this.cache == null) {
       return file;
     }
     // We need to synchronized here to avoid 2 different threads to copy the file to the cache directory and so
     // corrupting the content.
-    synchronized (this) {
+    synchronized (cache) {
       if (!file.exists()) {
         // Look for it in local file cache
-        File cacheFile = new File(cacheDir, fileName);
+        File cacheFile = cache.getFile(fileName);
         if (this.enableCaching && cacheFile.exists()) {
           return cacheFile;
         }
         // Look for file on classpath
         ClassLoader cl = getClassLoader();
-        if (NON_UNIX_FILE_SEP) {
-          fileName = fileName.replace(FILE_SEP, "/");
-        }
 
         //https://github.com/eclipse/vert.x/issues/2126
         //Cache all elements in the parent directory if it exists
@@ -160,12 +114,18 @@ public class FileResolver {
         //been read works.
         String parentFileName = file.getParent();
         if (parentFileName != null) {
+          if (NON_UNIX_FILE_SEP) {
+            parentFileName = parentFileName.replace(FILE_SEP, "/");
+          }
           URL directoryContents = getValidClassLoaderResource(cl, parentFileName);
           if (directoryContents != null) {
             unpackUrlResource(directoryContents, parentFileName, cl, true);
           }
         }
 
+        if (NON_UNIX_FILE_SEP) {
+          fileName = fileName.replace(FILE_SEP, "/");
+        }
         URL url = getValidClassLoaderResource(cl, fileName);
         if (url != null) {
           return unpackUrlResource(url, fileName, cl, false);
@@ -175,15 +135,41 @@ public class FileResolver {
     return file;
   }
 
-  private static boolean isValidCachePath(String fileName) {
-    int len = fileName.length();
-    for (int i = 0;i < len;i++) {
-      char c = fileName.charAt(i);
-      if (!CACHE_PATH_CHECKER.test(c)) {
-        return false;
-      }
+  private static boolean isValidWindowsCachePath(char c) {
+    if (c < 32) {
+      return false;
     }
-    return true;
+    switch (c) {
+      case '"':
+      case '*':
+      case ':':
+      case '<':
+      case '>':
+      case '?':
+      case '|':
+        return false;
+      default:
+        return true;
+    }
+  }
+
+  private static boolean isValidCachePath(String fileName) {
+    if (PlatformDependent.isWindows()) {
+      int len = fileName.length();
+      for (int i = 0;i < len;i++) {
+        char c = fileName.charAt(i);
+        if (!isValidWindowsCachePath(c)) {
+          return false;
+        }
+        // Space only valid when it's not ending a name
+        if (c == ' ' && (i + 1 == len || fileName.charAt(i + 1) == '/')) {
+          return false;
+        }
+      }
+      return true;
+    } else {
+      return fileName.indexOf('\u0000') == -1;
+    }
   }
 
   /**
@@ -209,6 +195,7 @@ public class FileResolver {
       case "bundle": // Apache Felix, Knopflerfish
       case "bundleentry": // Equinox
       case "bundleresource": // Equinox
+      case "jrt": // java run-time (JEP 220)
       case "resource":  // substratevm (graal native image)
         return unpackFromBundleURL(url, isDir);
       default:
@@ -217,35 +204,32 @@ public class FileResolver {
   }
 
 
-  private synchronized File unpackFromFileURL(URL url, String fileName, ClassLoader cl) {
+  private File unpackFromFileURL(URL url, String fileName, ClassLoader cl) {
     final File resource = new File(decodeURIComponent(url.getPath(), false));
     boolean isDirectory = resource.isDirectory();
-    File cacheFile = new File(cacheDir, fileName);
-    if (!isDirectory) {
-      cacheFile.getParentFile().mkdirs();
-      try {
-        if (this.enableCaching) {
-          Files.copy(resource.toPath(), cacheFile.toPath());
-        } else {
-          Files.copy(resource.toPath(), cacheFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        }
-      } catch (FileAlreadyExistsException ignore) {
-      } catch (IOException e) {
-        throw new VertxException(e);
-      }
-    } else {
-      cacheFile.mkdirs();
+    File cacheFile;
+    try {
+      cacheFile = cache.cache(fileName, resource, !enableCaching);
+    } catch (IOException e) {
+      throw new VertxException(e);
+    }
+    if (isDirectory) {
       String[] listing = resource.list();
-      for (String file: listing) {
-        String subResource = fileName + "/" + file;
-        URL url2 = getValidClassLoaderResource(cl, subResource);
-        unpackFromFileURL(url2, subResource, cl);
+      if (listing != null) {
+        for (String file: listing) {
+          String subResource = fileName + "/" + file;
+          URL url2 = getValidClassLoaderResource(cl, subResource);
+          if (url2 == null) {
+            throw new VertxException("Invalid resource: " + subResource);
+          }
+          unpackFromFileURL(url2, subResource, cl);
+        }
       }
     }
     return cacheFile;
   }
 
-  private synchronized File unpackFromJarURL(URL url, String fileName, ClassLoader cl) {
+  private File unpackFromJarURL(URL url, String fileName, ClassLoader cl) {
     ZipFile zip = null;
     try {
       String path = url.getPath();
@@ -266,34 +250,20 @@ public class FileResolver {
         zip = new ZipFile(file);
       }
 
-      String inJarPath = path.substring(idx1 + 6);
-      String[] parts = JAR_URL_SEP_PATTERN.split(inJarPath);
-      StringBuilder prefixBuilder = new StringBuilder();
-      for (int i = 0; i < parts.length - 1; i++) {
-        prefixBuilder.append(parts[i]).append("/");
-      }
-      String prefix = prefixBuilder.toString();
-
       Enumeration<? extends ZipEntry> entries = zip.entries();
       while (entries.hasMoreElements()) {
         ZipEntry entry = entries.nextElement();
         String name = entry.getName();
-        if (name.startsWith(prefix.isEmpty() ? fileName : prefix + fileName)) {
-          File file = new File(cacheDir, prefix.isEmpty() ? name : name.substring(prefix.length()));
+        if (name.startsWith(fileName)) {
           if (name.endsWith("/")) {
             // Directory
-            file.mkdirs();
+            cache.cacheDir(name);
           } else {
-            file.getParentFile().mkdirs();
             try (InputStream is = zip.getInputStream(entry)) {
-              if (this.enableCaching) {
-                Files.copy(is, file.toPath());
-              } else {
-                Files.copy(is, file.toPath(), StandardCopyOption.REPLACE_EXISTING);
-              }
-            } catch (FileAlreadyExistsException ignore) {
+              cache.cacheFile(name, is, !enableCaching);
             }
           }
+
         }
       }
     } catch (IOException e) {
@@ -302,7 +272,7 @@ public class FileResolver {
       closeQuietly(zip);
     }
 
-    return new File(cacheDir, fileName);
+    return cache.getFile(fileName);
   }
 
   private void closeQuietly(Closeable zip) {
@@ -335,28 +305,21 @@ public class FileResolver {
    * @param url      the url
    * @return the extracted file
    */
-  private synchronized File unpackFromBundleURL(URL url, boolean isDir) {
+  private File unpackFromBundleURL(URL url, boolean isDir) {
+    String file = url.getHost() + File.separator + url.getFile();
     try {
-      File file = new File(cacheDir, url.getHost() + File.separator + url.getFile());
-      file.getParentFile().mkdirs();
       if ((getClassLoader() != null && isBundleUrlDirectory(url))  || isDir) {
         // Directory
-        file.mkdirs();
+        cache.cacheDir(file);
       } else {
-        file.getParentFile().mkdirs();
         try (InputStream is = url.openStream()) {
-          if (this.enableCaching) {
-            Files.copy(is, file.toPath());
-          } else {
-            Files.copy(is, file.toPath(), StandardCopyOption.REPLACE_EXISTING);
-          }
-        } catch (FileAlreadyExistsException ignore) {
+          cache.cacheFile(file, is, !enableCaching);
         }
       }
     } catch (IOException e) {
       throw new VertxException(e);
     }
-    return new File(cacheDir, url.getHost() + File.separator + url.getFile());
+    return cache.getFile(file);
   }
 
 
@@ -374,42 +337,4 @@ public class FileResolver {
     }
     return cl;
   }
-
-  private synchronized void setupCacheDir(String id) {
-    String cacheDirName = fileCacheDir + "/file-cache-" + id;
-    cacheDir = new File(cacheDirName);
-    if (!cacheDir.mkdirs()) {
-      throw new IllegalStateException("Failed to create cache dir: " + cacheDirName);
-    }
-    // Add shutdown hook to delete on exit
-    shutdownHook = new Thread(() -> {
-      final Thread deleteCacheDirThread = new Thread(() -> {
-        try {
-          deleteCacheDir();
-        } catch (IOException ignore) {
-        }
-      });
-      // start the thread
-      deleteCacheDirThread.start();
-      try {
-        deleteCacheDirThread.join(10 * 1000);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    });
-    Runtime.getRuntime().addShutdownHook(shutdownHook);
-  }
-
-  private void deleteCacheDir() throws IOException {
-    Path path;
-    synchronized (this) {
-      if (cacheDir == null || !cacheDir.exists()) {
-        return;
-      }
-      path = cacheDir.toPath();
-      cacheDir = null;
-    }
-    FileSystemImpl.delete(path, true);
-  }
 }
-

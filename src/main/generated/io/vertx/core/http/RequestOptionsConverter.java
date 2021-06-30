@@ -2,6 +2,7 @@ package io.vertx.core.http;
 
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
+import io.vertx.core.json.impl.JsonUtil;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 
@@ -25,27 +26,19 @@ public class RequestOptionsConverter {
             obj.setFollowRedirects((Boolean)member.getValue());
           }
           break;
-        case "headers":
-          if (member.getValue() instanceof JsonObject) {
-            ((Iterable<java.util.Map.Entry<String, Object>>)member.getValue()).forEach(entry -> {
-              if (entry.getValue() instanceof String)
-                obj.addHeader(entry.getKey(), (String)entry.getValue());
-            });
-          }
-          break;
         case "host":
           if (member.getValue() instanceof String) {
             obj.setHost((String)member.getValue());
           }
           break;
-        case "method":
-          if (member.getValue() instanceof String) {
-            obj.setMethod(new io.vertx.core.http.HttpMethod((java.lang.String)member.getValue()));
-          }
-          break;
         case "port":
           if (member.getValue() instanceof Number) {
             obj.setPort(((Number)member.getValue()).intValue());
+          }
+          break;
+        case "proxyOptions":
+          if (member.getValue() instanceof JsonObject) {
+            obj.setProxyOptions(new io.vertx.core.net.ProxyOptions((io.vertx.core.json.JsonObject)member.getValue()));
           }
           break;
         case "ssl":
@@ -78,11 +71,11 @@ public class RequestOptionsConverter {
     if (obj.getHost() != null) {
       json.put("host", obj.getHost());
     }
-    if (obj.getMethod() != null) {
-      json.put("method", obj.getMethod().toJson());
-    }
     if (obj.getPort() != null) {
       json.put("port", obj.getPort());
+    }
+    if (obj.getProxyOptions() != null) {
+      json.put("proxyOptions", obj.getProxyOptions().toJson());
     }
     if (obj.isSsl() != null) {
       json.put("ssl", obj.isSsl());

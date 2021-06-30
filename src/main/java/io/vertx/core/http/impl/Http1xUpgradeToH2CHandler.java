@@ -30,7 +30,7 @@ import static io.netty.handler.codec.http.HttpResponseStatus.BAD_REQUEST;
 import static io.netty.handler.codec.http.HttpResponseStatus.SWITCHING_PROTOCOLS;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 
-class Http1xUpgradeToH2CHandler extends ChannelInboundHandlerAdapter {
+public class Http1xUpgradeToH2CHandler extends ChannelInboundHandlerAdapter {
 
   private final HttpServerWorker initializer;
   private VertxHttp2ConnectionHandler<Http2ServerConnection> handler;
@@ -81,10 +81,11 @@ class Http1xUpgradeToH2CHandler extends ChannelInboundHandlerAdapter {
                 res.headers().add(HttpHeaderNames.UPGRADE, Http2CodecUtil.HTTP_UPGRADE_PROTOCOL_NAME);
                 ctx.writeAndFlush(res);
                 pipeline.remove("httpEncoder");
-                if(isCompressionSupported) {
+                if (isCompressionSupported) {
                   pipeline.remove("deflater");
+                  pipeline.remove("chunkedWriter");
                 }
-                if(isDecompressionSupported) {
+                if (isDecompressionSupported) {
                   pipeline.remove("inflater");
                 }
                 handler = initializer.buildHttp2ConnectionHandler(initializer.context, initializer.connectionHandler);
@@ -119,14 +120,12 @@ class Http1xUpgradeToH2CHandler extends ChannelInboundHandlerAdapter {
       if (handler != null) {
         if (msg instanceof HttpContent) {
           HttpContent content = (HttpContent) msg;
-          ByteBuf buf = VertxHandler.safeBuffer(content.content(), ctx.alloc());
+          ByteBuf buf = VertxHandler.safeBuffer(content.content());
           boolean end = msg instanceof LastHttpContent;
           ctx.fireChannelRead(new DefaultHttp2DataFrame(buf, end, 0));
           if (end) {
             ChannelPipeline pipeline = ctx.pipeline();
-            Iterator<Map.Entry<String, ChannelHandler>> iterator = pipeline.iterator();
-            while (iterator.hasNext()) {
-              Map.Entry<String, ChannelHandler> handler = iterator.next();
+            for (Map.Entry<String, ChannelHandler> handler : pipeline) {
               if (handler.getValue() instanceof Http2ConnectionHandler) {
                 // Continue
               } else {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2019 Contributors to the Eclipse Foundation
+ * Copyright (c) 2011-2020 Contributors to the Eclipse Foundation
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License 2.0 which is available at
@@ -10,18 +10,16 @@
  */
 package io.vertx.core.eventbus.impl;
 
-import io.vertx.core.AsyncResult;
-import io.vertx.core.Closeable;
-import io.vertx.core.Future;
-import io.vertx.core.Handler;
-import io.vertx.core.Promise;
+import io.vertx.core.*;
 import io.vertx.core.eventbus.DeliveryContext;
 import io.vertx.core.eventbus.Message;
 import io.vertx.core.impl.ContextInternal;
 import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
+import io.vertx.core.spi.tracing.SpanKind;
 import io.vertx.core.spi.tracing.TagExtractor;
 import io.vertx.core.spi.tracing.VertxTracer;
+import io.vertx.core.tracing.TracingPolicy;
 
 import java.util.Iterator;
 
@@ -103,7 +101,7 @@ public abstract class HandlerRegistration<T> implements Closeable {
 
   void dispatch(Handler<Message<T>> theHandler, Message<T> message, ContextInternal context) {
     InboundDeliveryContext deliveryCtx = new InboundDeliveryContext((MessageImpl<?, T>) message, theHandler, context);
-    deliveryCtx.dispatch();
+    context.dispatch(deliveryCtx::dispatch);
   }
 
   void discard(Message<T> msg) {
@@ -155,10 +153,11 @@ public abstract class HandlerRegistration<T> implements Closeable {
           bus.metrics.messageDelivered(m, message.isLocal());
         }
         if (tracer != null && !src) {
-          message.trace = tracer.receiveRequest(context, message, message.isSend() ? "send" : "publish", message.headers(), MessageTagExtractor.INSTANCE);
+          message.trace = tracer.receiveRequest(context, SpanKind.RPC, TracingPolicy.PROPAGATE, message, message.isSend() ? "send" : "publish", message.headers(), MessageTagExtractor.INSTANCE);
           HandlerRegistration.this.dispatch(message, context, handler);
-          if (message.replyAddress == null) {
-            tracer.sendResponse(context, null, message.trace, null, TagExtractor.empty());
+          Object trace = message.trace;
+          if (message.replyAddress == null && trace != null) {
+            tracer.sendResponse(context, null, trace, null, TagExtractor.empty());
           }
         } else {
           HandlerRegistration.this.dispatch(message, context, handler);

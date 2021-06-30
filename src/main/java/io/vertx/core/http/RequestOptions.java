@@ -16,9 +16,13 @@ import io.vertx.codegen.annotations.GenIgnore;
 import io.vertx.core.MultiMap;
 import io.vertx.core.VertxException;
 import io.vertx.core.json.JsonObject;
+import io.vertx.core.net.ProxyOptions;
+import io.vertx.core.net.SocketAddress;
 
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -28,6 +32,16 @@ import java.util.Objects;
  */
 @DataObject(generateConverter = true)
 public class RequestOptions {
+
+  /**
+   * The default value for proxy options = {@code null}
+   */
+  public static final ProxyOptions DEFAULT_PROXY_OPTIONS = null;
+
+  /**
+   * The default value for server method = {@code null}
+   */
+  public static final SocketAddress DEFAULT_SERVER = null;
 
   /**
    * The default value for HTTP method = {@link HttpMethod#GET}
@@ -50,9 +64,9 @@ public class RequestOptions {
   public static final Boolean DEFAULT_SSL = null;
 
   /**
-   * The default relative request URI = ""
+   * The default request URI = {@code "/"}
    */
-  public static final String DEFAULT_URI = "";
+  public static final String DEFAULT_URI = "/";
 
   /**
    * Follow redirection by default = {@code false}
@@ -64,6 +78,8 @@ public class RequestOptions {
    */
   public static final long DEFAULT_TIMEOUT = 0;
 
+  private ProxyOptions proxyOptions;
+  private SocketAddress server;
   private HttpMethod method;
   private String host;
   private Integer port;
@@ -77,6 +93,8 @@ public class RequestOptions {
    * Default constructor
    */
   public RequestOptions() {
+    proxyOptions = DEFAULT_PROXY_OPTIONS;
+    server = DEFAULT_SERVER;
     method = DEFAULT_HTTP_METHOD;
     host = DEFAULT_HOST;
     port = DEFAULT_PORT;
@@ -92,6 +110,8 @@ public class RequestOptions {
    * @param other  the options to copy
    */
   public RequestOptions(RequestOptions other) {
+    setProxyOptions(other.proxyOptions);
+    setServer(other.server);
     setMethod(other.method);
     setHost(other.host);
     setPort(other.port);
@@ -110,7 +130,83 @@ public class RequestOptions {
    * @param json the JSON
    */
   public RequestOptions(JsonObject json) {
+    this();
     RequestOptionsConverter.fromJson(json, this);
+    String method = json.getString("method");
+    if (method != null) {
+      setMethod(HttpMethod.valueOf(method));
+    }
+    JsonObject server = json.getJsonObject("server");
+    if (server != null) {
+      Integer port = server.getInteger("port", 80);
+      String host = server.getString("host");
+      String path = server.getString("path");
+      if (host != null) {
+        this.server = SocketAddress.inetSocketAddress(port, host);
+      } else if (path != null) {
+        this.server = SocketAddress.domainSocketAddress(path);
+      }
+    }
+    JsonObject headers = json.getJsonObject("headers");
+    if (headers != null) {
+      for (Map.Entry<String, Object> entry : headers) {
+        Object value = entry.getValue();
+        if (value instanceof String) {
+          this.addHeader(entry.getKey(), (String) value);
+        } else if (value instanceof Iterable) {
+          for (Object subValue : ((Iterable<?>) value)) {
+            if (subValue instanceof String) {
+              this.addHeader(entry.getKey(), (String) subValue);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Get the proxy options override for connections
+   *
+   * @return proxy options override
+   */
+  public ProxyOptions getProxyOptions() {
+    return proxyOptions;
+  }
+
+  /**
+   * Override the {@link HttpClientOptions#setProxyOptions(ProxyOptions)} proxy options
+   * for connections.
+   *
+   * @param proxyOptions proxy options override object
+   * @return a reference to this, so the API can be used fluently
+   */
+  public RequestOptions setProxyOptions(ProxyOptions proxyOptions) {
+    this.proxyOptions = proxyOptions;
+    return this;
+  }
+
+  /**
+   * Get the server address to be used by the client request.
+   *
+   * @return the server address
+   */
+  public SocketAddress getServer() {
+    return server;
+  }
+
+  /**
+   * Set the server address to be used by the client request.
+   *
+   * <p> When the server address is {@code null}, the address will be resolved after the {@code host}
+   * property by the Vert.x resolver.
+   *
+   * <p> Use this when you want to connect to a specific server address without name resolution.
+   *
+   * @return a reference to this, so the API can be used fluently
+   */
+  public RequestOptions setServer(SocketAddress server) {
+    this.server = server;
+    return this;
   }
 
   /**
@@ -118,6 +214,7 @@ public class RequestOptions {
    *
    * @return  the HTTP method
    */
+  @GenIgnore
   public HttpMethod getMethod() {
     return method;
   }
@@ -127,6 +224,7 @@ public class RequestOptions {
    *
    * @return a reference to this, so the API can be used fluently
    */
+  @GenIgnore
   public RequestOptions setMethod(HttpMethod method) {
     this.method = method;
     return this;
@@ -178,7 +276,7 @@ public class RequestOptions {
   }
 
   /**
-   * Set whether SSL/TLS is enabled
+   * Set whether SSL/TLS is enabled.
    *
    * @param ssl  true if enabled
    * @return a reference to this, so the API can be used fluently
@@ -196,7 +294,7 @@ public class RequestOptions {
   }
 
   /**
-   * Set the request relative URI
+   * Set the request relative URI.
    *
    * @param uri  the relative uri
    * @return a reference to this, so the API can be used fluently
@@ -299,6 +397,7 @@ public class RequestOptions {
    * @param value  the header value
    * @return a reference to this, so the API can be used fluently
    */
+  @GenIgnore
   public RequestOptions addHeader(String key, String value) {
     return addHeader((CharSequence) key, value);
   }
@@ -325,6 +424,64 @@ public class RequestOptions {
     Objects.requireNonNull(key, "no null key accepted");
     Objects.requireNonNull(values, "no null values accepted");
     headers.add(key, values);
+    return this;
+  }
+
+  /**
+   * Set a request header.
+   *
+   * @param key  the header key
+   * @param value  the header value
+   * @return a reference to this, so the API can be used fluently
+   */
+  @GenIgnore
+  public RequestOptions putHeader(String key, String value) {
+    return putHeader((CharSequence) key, value);
+  }
+
+  /**
+   * Set a request header.
+   *
+   * @param key  the header key
+   * @param value  the header value
+   * @return a reference to this, so the API can be used fluently
+   */
+  @GenIgnore
+  public RequestOptions putHeader(CharSequence key, CharSequence value) {
+    checkHeaders();
+    headers.set(key, value);
+    return this;
+  }
+
+  @GenIgnore
+  public RequestOptions putHeader(CharSequence key, Iterable<CharSequence> values) {
+    checkHeaders();
+    headers.set(key, values);
+    return this;
+  }
+
+  /**
+   * Add a request header.
+   *
+   * @param key  the header key
+   * @return a reference to this, so the API can be used fluently
+   */
+  @GenIgnore
+  public RequestOptions removeHeader(String key) {
+    return removeHeader((CharSequence) key);
+  }
+
+  /**
+   * Add a request header.
+   *
+   * @param key  the header key
+   * @return a reference to this, so the API can be used fluently
+   */
+  @GenIgnore
+  public RequestOptions removeHeader(CharSequence key) {
+    if (headers != null) {
+      headers.remove(key);
+    }
     return this;
   }
 
@@ -359,6 +516,31 @@ public class RequestOptions {
   public JsonObject toJson() {
     JsonObject json = new JsonObject();
     RequestOptionsConverter.toJson(this, json);
+    if (method != null) {
+      json.put("method", method.name());
+    }
+    if (this.server != null) {
+      JsonObject server = new JsonObject();
+      if (this.server.isInetSocket()) {
+        server.put("host", this.server.host());
+        server.put("port", this.server.port());
+      } else {
+        server.put("path", this.server.path());
+      }
+      json.put("server", server);
+    }
+    if (this.headers != null) {
+      JsonObject headers = new JsonObject();
+      for (String name : this.headers.names()) {
+        List<String> values = this.headers.getAll(name);
+        if (values.size() == 1) {
+          headers.put(name, values.iterator().next());
+        } else {
+          headers.put(name, values);
+        }
+      }
+      json.put("headers", headers);
+    }
     return json;
   }
 }

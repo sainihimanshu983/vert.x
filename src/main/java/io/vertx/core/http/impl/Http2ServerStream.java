@@ -15,12 +15,14 @@ import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http2.Http2Headers;
 import io.vertx.core.AsyncResult;
 import io.vertx.core.Handler;
+import io.vertx.core.MultiMap;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.StreamPriority;
 import io.vertx.core.impl.ContextInternal;
 import io.vertx.core.spi.metrics.HttpServerMetrics;
 import io.vertx.core.spi.metrics.Metrics;
+import io.vertx.core.spi.observability.HttpRequest;
 
 import static io.vertx.core.spi.metrics.Metrics.METRICS_ENABLED;
 
@@ -30,7 +32,7 @@ abstract class Http2ServerStream extends VertxHttp2Stream<Http2ServerConnection>
   protected final HttpMethod method;
   protected final String uri;
   protected final String host;
-  protected final Http2ServerResponseImpl response;
+  protected final Http2ServerResponse response;
   private Object metric;
 
   Http2ServerStream(Http2ServerConnection conn,
@@ -44,7 +46,7 @@ abstract class Http2ServerStream extends VertxHttp2Stream<Http2ServerConnection>
     this.method = method;
     this.uri = uri;
     this.host = null;
-    this.response = new Http2ServerResponseImpl(conn, this, true, contentEncoding, null);
+    this.response = new Http2ServerResponse(conn, this, true, contentEncoding, null);
   }
 
   Http2ServerStream(Http2ServerConnection conn, ContextInternal context, Http2Headers headers, String contentEncoding, String serverOrigin) {
@@ -60,7 +62,7 @@ abstract class Http2ServerStream extends VertxHttp2Stream<Http2ServerConnection>
     this.host = host;
     this.uri = headers.get(":path") != null ? headers.get(":path").toString() : null;
     this.method = headers.get(":method") != null ? HttpMethod.valueOf(headers.get(":method").toString()) : null;
-    this.response = new Http2ServerResponseImpl(conn, this, false, contentEncoding, host);
+    this.response = new Http2ServerResponse(conn, this, false, contentEncoding, host);
   }
 
   void registerMetrics() {
@@ -70,7 +72,7 @@ abstract class Http2ServerStream extends VertxHttp2Stream<Http2ServerConnection>
         if (response.isPush()) {
           metric = metrics.responsePushed(conn.metric(), method(), uri, response);
         } else {
-          metric = metrics.requestBegin(conn.metric(), (HttpServerRequest) this);
+          metric = metrics.requestBegin(conn.metric(), (HttpRequest) this);
         }
       }
     }
@@ -91,12 +93,26 @@ abstract class Http2ServerStream extends VertxHttp2Stream<Http2ServerConnection>
     dispatch(conn.requestHandler);
   }
 
+  @Override
+  void onEnd(MultiMap trailers) {
+    if (Metrics.METRICS_ENABLED) {
+      HttpServerMetrics metrics = conn.metrics();
+      if (metrics != null) {
+        metrics.requestEnd(metric, (HttpRequest) this, bytesRead());
+      }
+    }
+    super.onEnd(trailers);
+  }
+
   abstract void dispatch(Handler<HttpServerRequest> handler);
 
   @Override
   void doWriteHeaders(Http2Headers headers, boolean end, Handler<AsyncResult<Void>> handler) {
-    if (Metrics.METRICS_ENABLED && !end && metric != null) {
-      conn.metrics().responseBegin(metric, response);
+    if (Metrics.METRICS_ENABLED && !end) {
+      HttpServerMetrics metrics = conn.metrics();
+      if (metrics != null) {
+        metrics.responseBegin(metric, response);
+      }
     }
     super.doWriteHeaders(headers, end, handler);
   }
@@ -123,9 +139,23 @@ abstract class Http2ServerStream extends VertxHttp2Stream<Http2ServerConnection>
         if (failed) {
           metrics.requestReset(metric);
         } else {
-          metrics.responseEnd(metric, response);
+          metrics.responseEnd(metric, response, bytesWritten());
         }
       }
     }
+  }
+
+  public Object metric() {
+    return metric;
+  }
+
+  HttpServerRequest routed(String route) {
+    if (METRICS_ENABLED && !response.ended()) {
+      HttpServerMetrics metrics = conn.metrics();
+      if (metrics != null) {
+        metrics.requestRouted(metric, route);
+      }
+    }
+    return null;
   }
 }

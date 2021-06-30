@@ -24,15 +24,22 @@ import io.vertx.core.net.impl.KeyStoreHelper;
 import io.vertx.test.netty.TestLoggerFactory;
 
 import javax.security.cert.X509Certificate;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.RandomAccessFile;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.Supplier;
+import java.util.jar.JarEntry;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.Assert.assertTrue;
@@ -42,6 +49,11 @@ import static org.junit.Assert.fail;
  * @author <a href="http://tfox.org">Tim Fox</a>
  */
 public class TestUtils {
+
+  /**
+   * Non routable host for testing connect timeout.
+   */
+  public static final String NON_ROUTABLE_HOST = "10.0.0.0";
 
   private static Random random = new Random();
 
@@ -415,6 +427,15 @@ public class TestUtils {
     );
   }
 
+  public static String cnOf(Certificate cert) throws Exception {
+    if (cert instanceof java.security.cert.X509Certificate) {
+      String dn = ((java.security.cert.X509Certificate)cert).getSubjectX500Principal().getName();
+      List<String> names = KeyStoreHelper.getX509CertificateCommonNames(dn);
+      return names.isEmpty() ? null : names.get(0);
+    }
+    return null;
+  }
+
   public static String cnOf(X509Certificate cert) throws Exception {
     String dn = cert.getSubjectDN().getName();
     List<String> names = KeyStoreHelper.getX509CertificateCommonNames(dn);
@@ -446,6 +467,12 @@ public class TestUtils {
     RandomAccessFile f = new RandomAccessFile(tmp, "rw");
     f.setLength(length);
     return tmp;
+  }
+
+  public static String getJarEntryName(Path path) {
+    return StreamSupport
+      .stream(path.spliterator(), false)
+      .map(p -> "" + p.getName(0)).collect(Collectors.joining("/"));
   }
 
   public static TestLoggerFactory testLogging(Runnable runnable) {

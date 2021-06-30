@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2019 Contributors to the Eclipse Foundation
+ * Copyright (c) 2011-2021 Contributors to the Eclipse Foundation
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License 2.0 which is available at
@@ -15,9 +15,11 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.ConnectTimeoutException;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.util.internal.PlatformDependent;
 import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.eventbus.Message;
@@ -32,6 +34,7 @@ import io.vertx.core.json.JsonObject;
 import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
 import io.vertx.core.net.impl.NetServerImpl;
+import io.vertx.core.net.impl.VertxHandler;
 import io.vertx.core.streams.ReadStream;
 import io.vertx.test.core.*;
 import io.vertx.test.proxy.*;
@@ -51,6 +54,7 @@ import javax.security.cert.X509Certificate;
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.cert.Certificate;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -1280,6 +1284,7 @@ public class NetTest extends VertxTestBase {
 
   @Test
   public void testTLSTrailingDotHost() throws Exception {
+    Assume.assumeTrue(PlatformDependent.javaVersion() < 9);
     // We just need a vanilla cert for this test
     SelfSignedCertificate cert = SelfSignedCertificate.create("host2.com");
     TLSTest test = new TLSTest()
@@ -1469,6 +1474,16 @@ public class NetTest extends VertxTestBase {
     assertEquals("host2.com", test.indicatedServerName);
   }
 
+  @Test
+  public void testServerCertificateMultiple() throws Exception {
+    TLSTest test = new TLSTest()
+      .serverCert(Cert.MULTIPLE_JKS)
+      .clientTrustAll(true);
+    test.run(true);
+    await();
+    assertEquals("precious", cnOf(test.clientPeerCert()));
+  }
+
   void testTLS(Cert<?> clientCert, Trust<?> clientTrust,
                Cert<?> serverCert, Trust<?> serverTrust,
     boolean requireClientAuth, boolean clientTrustAll,
@@ -1521,7 +1536,7 @@ public class NetTest extends VertxTestBase {
     SocketAddress bindAddress = SocketAddress.inetSocketAddress(4043, "localhost");
     SocketAddress connectAddress = bindAddress;
     String serverName;
-    X509Certificate clientPeerCert;
+    Certificate clientPeerCert;
     String indicatedServerName;
 
     public TLSTest clientCert(Cert<?> clientCert) {
@@ -1595,7 +1610,7 @@ public class NetTest extends VertxTestBase {
       return this;
     }
 
-    public X509Certificate clientPeerCert() {
+    public Certificate clientPeerCert() {
       return clientPeerCert;
     }
 
@@ -1623,10 +1638,10 @@ public class NetTest extends VertxTestBase {
 
       Consumer<NetSocket> certificateChainChecker = socket -> {
         try {
-          X509Certificate[] certs = socket.peerCertificateChain();
+          List<Certificate> certs = socket.peerCertificates();
           if (clientCert != Cert.NONE) {
             assertNotNull(certs);
-            assertEquals(1, certs.length);
+            assertEquals(1, certs.size());
           } else {
             assertNull(certs);
           }
@@ -1719,7 +1734,7 @@ public class NetTest extends VertxTestBase {
 
             if (socket.isSsl()) {
               try {
-                clientPeerCert = socket.peerCertificateChain()[0];
+                clientPeerCert = socket.peerCertificates().get(0);
               } catch (SSLPeerUnverifiedException ignore) {
               }
             }
@@ -1739,7 +1754,7 @@ public class NetTest extends VertxTestBase {
                   handler = onSuccess(v -> {
                     assertTrue(socket.isSsl());
                     try {
-                      clientPeerCert = socket.peerCertificateChain()[0];
+                      clientPeerCert = socket.peerCertificates().get(0);
                     } catch (SSLPeerUnverifiedException ignore) {
                     }
                     // Now send the rest
@@ -3047,6 +3062,26 @@ public class NetTest extends VertxTestBase {
   }
 
   @Test
+  public void testNonProxyHosts() throws Exception {
+    NetClientOptions clientOptions = new NetClientOptions()
+      .addNonProxyHost("example.com")
+      .setProxyOptions(new ProxyOptions().setType(ProxyType.HTTP).setPort(13128));
+    NetClient client = vertx.createNetClient(clientOptions);
+    server.connectHandler(sock -> {
+
+    });
+    proxy = new HttpProxy(null);
+    proxy.start(vertx);
+    server.listen(1234, "localhost", onSuccess(s -> {
+      client.connect(1234, "example.com", onSuccess(so -> {
+        assertNull(proxy.getLastUri());
+        testComplete();
+      }));
+    }));
+    await();
+  }
+
+  @Test
   public void testTLSHostnameCertCheckCorrect() {
     server.close();
     server = vertx.createNetServer(new NetServerOptions().setSsl(true).setPort(4043)
@@ -3124,6 +3159,8 @@ public class NetTest extends VertxTestBase {
 
   @Test
   public void testSelfSignedCertificate() throws Exception {
+    Assume.assumeTrue(PlatformDependent.javaVersion() < 9);
+
     CountDownLatch latch = new CountDownLatch(2);
 
     SelfSignedCertificate certificate = SelfSignedCertificate.create();
@@ -3283,12 +3320,14 @@ public class NetTest extends VertxTestBase {
     });
     startServer(SocketAddress.inetSocketAddress(1234, "localhost"));
     HttpClient client = vertx.createHttpClient(clientOptions);
-    client.get(1234, "localhost", "/somepath", onSuccess(resp -> {
-      assertEquals(200, resp.statusCode());
-      resp.bodyHandler(buff -> {
-        assertEquals("Hello World", buff.toString());
-        complete();
-      });
+    client.request(io.vertx.core.http.HttpMethod.GET, 1234, "localhost", "/somepath", onSuccess(req -> {
+      req.send(onSuccess(resp -> {
+        assertEquals(200, resp.statusCode());
+        resp.body(onSuccess(body -> {
+          assertEquals("Hello World", body.toString());
+          complete();
+        }));
+      }));
     }));
     await();
   }
@@ -3381,6 +3420,25 @@ public class NetTest extends VertxTestBase {
         assertEquals("Hello World", msg.toString());
         testComplete();
       });
+    }));
+    await();
+  }
+
+  @Test
+  public void testNetSocketInternalRemoveVertxHandler() throws Exception {
+    server.connectHandler(so -> {
+      so.closeHandler(v -> testComplete());
+    });
+    startServer();
+    client.connect(testAddress, onSuccess(so -> {
+      NetSocketInternal soi = (NetSocketInternal) so;
+      String id = soi.writeHandlerID();
+      ChannelHandlerContext ctx = soi.channelHandlerContext();
+      ChannelPipeline pipeline = ctx.pipeline();
+      pipeline.remove(VertxHandler.class);
+      vertx.eventBus().request(id, "test", onFailure(what -> {
+        ctx.close();
+      }));
     }));
     await();
   }
@@ -4016,4 +4074,15 @@ public class NetTest extends VertxTestBase {
       assertEquals(address1.port(), address2.port());
     }
   }
-}
+
+  @Test
+  public void testConnectTimeout() {
+    client.close();
+    client = vertx.createNetClient(new NetClientOptions().setConnectTimeout(250));
+    client.connect(1234, TestUtils.NON_ROUTABLE_HOST)
+      .onComplete(onFailure(err -> {
+        assertTrue(err instanceof ConnectTimeoutException);
+        testComplete();
+      }));
+    await();
+  }}

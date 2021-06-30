@@ -12,7 +12,6 @@
 package io.vertx.core.net.impl;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.handler.ssl.SniHandler;
@@ -27,7 +26,6 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.eventbus.Message;
 import io.vertx.core.eventbus.MessageConsumer;
 import io.vertx.core.impl.ContextInternal;
-import io.vertx.core.impl.VertxInternal;
 import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
 import io.vertx.core.net.NetSocket;
@@ -53,13 +51,7 @@ import java.util.UUID;
  */
 public class NetSocketImpl extends ConnectionBase implements NetSocketInternal {
 
-  private static final Handler<Object> NULL_MSG_HANDLER = event -> {
-    if (event instanceof ReferenceCounted) {
-      ReferenceCounted refCounter = (ReferenceCounted) event;
-      refCounter.release();
-    }
-  };
-
+  private static final Handler<Object> DEFAULT_MSG_HANDLER = new InvalidMessageHandler();
   private static final Logger log = LoggerFactory.getLogger(NetSocketImpl.class);
 
   private final String writeHandlerID;
@@ -67,24 +59,29 @@ public class NetSocketImpl extends ConnectionBase implements NetSocketInternal {
   private final SocketAddress remoteAddress;
   private final TCPMetrics metrics;
   private final InboundBuffer<Object> pending;
+  private final String negotiatedApplicationLayerProtocol;
   private Handler<Void> endHandler;
   private Handler<Void> drainHandler;
   private MessageConsumer registration;
   private Handler<Object> messageHandler;
 
-  public NetSocketImpl(VertxInternal vertx, ChannelHandlerContext channel, ContextInternal context,
-                       SSLHelper helper, TCPMetrics metrics) {
-    this(vertx, channel, null, context, helper, metrics);
+  public NetSocketImpl(ContextInternal context, ChannelHandlerContext channel, SSLHelper helper, TCPMetrics metrics) {
+    this(context, channel, null, helper, metrics, null);
   }
 
-  public NetSocketImpl(VertxInternal vertx, ChannelHandlerContext channel, SocketAddress remoteAddress, ContextInternal context,
-                       SSLHelper helper, TCPMetrics metrics) {
-    super(vertx, channel, context);
+  public NetSocketImpl(ContextInternal context,
+                       ChannelHandlerContext channel,
+                       SocketAddress remoteAddress,
+                       SSLHelper helper,
+                       TCPMetrics metrics,
+                       String negotiatedApplicationLayerProtocol) {
+    super(context, channel);
     this.helper = helper;
     this.writeHandlerID = "__vertx.net." + UUID.randomUUID().toString();
     this.remoteAddress = remoteAddress;
     this.metrics = metrics;
-    this.messageHandler = NULL_MSG_HANDLER;
+    this.messageHandler = DEFAULT_MSG_HANDLER;
+    this.negotiatedApplicationLayerProtocol = negotiatedApplicationLayerProtocol;
     pending = new InboundBuffer<>(context);
     pending.drainHandler(v -> doResume());
     pending.exceptionHandler(context::reportException);
@@ -103,9 +100,17 @@ public class NetSocketImpl extends ConnectionBase implements NetSocketInternal {
     });
   }
 
-  synchronized void registerEventBusHandler() {
+  void registerEventBusHandler() {
     Handler<Message<Buffer>> writeHandler = msg -> write(msg.body());
     registration = vertx.eventBus().<Buffer>localConsumer(writeHandlerID).handler(writeHandler);
+  }
+
+  void unregisterEventBusHandler() {
+    if (registration != null) {
+      MessageConsumer consumer = registration;
+      registration = null;
+      consumer.unregister();
+    }
   }
 
   @Override
@@ -136,6 +141,18 @@ public class NetSocketImpl extends ConnectionBase implements NetSocketInternal {
     if (msg instanceof ByteBuf) {
       reportBytesWritten(((ByteBuf)msg).readableBytes());
     }
+  }
+
+  @Override
+  protected void reportBytesRead(Object msg) {
+    if (msg instanceof ByteBuf) {
+      reportBytesRead(((ByteBuf)msg).readableBytes());
+    }
+  }
+
+  @Override
+  public String applicationLayerProtocol() {
+    return negotiatedApplicationLayerProtocol;
   }
 
   @Override
@@ -177,7 +194,7 @@ public class NetSocketImpl extends ConnectionBase implements NetSocketInternal {
   @Override
   public synchronized NetSocket handler(Handler<Buffer> dataHandler) {
     if (dataHandler != null) {
-      messageHandler(new DataMessageHandler(channelHandlerContext().alloc(), dataHandler));
+      messageHandler(new DataMessageHandler(dataHandler));
     } else {
       messageHandler(null);
     }
@@ -325,11 +342,11 @@ public class NetSocketImpl extends ConnectionBase implements NetSocketInternal {
           } else {
             res = Future.failedFuture(future.cause());
           }
-          context.dispatch(res, handler);
+          context.emit(res, handler);
         }
       });
       if (remoteAddress != null) {
-        sslHandler = new SslHandler(helper.createEngine(vertx, remoteAddress, serverName));
+        sslHandler = new SslHandler(helper.createEngine(vertx, remoteAddress, serverName, false));
         ((SslHandler) sslHandler).setHandshakeTimeout(helper.getSslHandshakeTimeout(), helper.getSslHandshakeTimeoutUnit());
       } else {
         if (helper.isSNI()) {
@@ -346,7 +363,7 @@ public class NetSocketImpl extends ConnectionBase implements NetSocketInternal {
 
   @Override
   protected void handleInterestedOpsChanged() {
-    context.dispatch(null, v -> callDrainHandler());
+    context.emit(null, v -> callDrainHandler());
   }
 
   @Override
@@ -361,46 +378,46 @@ public class NetSocketImpl extends ConnectionBase implements NetSocketInternal {
 
   @Override
   protected void handleClosed() {
-    MessageConsumer consumer;
-    synchronized (this) {
-      consumer = registration;
-      registration = null;
-    }
-    context.dispatch(InboundBuffer.END_SENTINEL, pending::write);
+    context.emit(InboundBuffer.END_SENTINEL, pending::write);
     super.handleClosed();
-    if (consumer != null) {
-      consumer.unregister();
-    }
   }
 
   public void handleMessage(Object msg) {
     if (msg instanceof ByteBuf) {
-      reportBytesRead(((ByteBuf)msg).readableBytes());
+      msg = VertxHandler.safeBuffer((ByteBuf) msg);
     }
-    context.dispatch(msg, o -> {
-      if (!pending.write(msg)) {
+    context.emit(msg, elt -> {
+      if (!pending.write(elt)) {
         doPause();
       }
     });
   }
 
-  private class DataMessageHandler implements Handler<Object> {
+  private static class DataMessageHandler implements Handler<Object> {
 
     private final Handler<Buffer> dataHandler;
-    private final ByteBufAllocator allocator;
 
-    DataMessageHandler(ByteBufAllocator allocator, Handler<Buffer> dataHandler) {
-      this.allocator = allocator;
+    DataMessageHandler(Handler<Buffer> dataHandler) {
       this.dataHandler = dataHandler;
     }
 
     @Override
-    public void handle(Object event) {
-      if (event instanceof ByteBuf) {
-        ByteBuf byteBuf = (ByteBuf) event;
-        byteBuf = VertxHandler.safeBuffer(byteBuf, allocator);
+    public void handle(Object msg) {
+      if (msg instanceof ByteBuf) {
+        ByteBuf byteBuf = (ByteBuf) msg;
         Buffer data = Buffer.buffer(byteBuf);
         dataHandler.handle(data);
+      }
+    }
+  }
+
+  private static class InvalidMessageHandler implements Handler<Object> {
+    @Override
+    public void handle(Object msg) {
+      // ByteBuf are eagerly released when the message is processed
+      if (msg instanceof ReferenceCounted && (!(msg instanceof ByteBuf))) {
+        ReferenceCounted refCounter = (ReferenceCounted) msg;
+        refCounter.release();
       }
     }
   }

@@ -21,12 +21,13 @@ import io.vertx.core.impl.ContextInternal;
 import io.vertx.core.spi.tracing.TagExtractor;
 import io.vertx.core.spi.tracing.VertxTracer;
 
-class ReplyHandler<T> extends HandlerRegistration<T> {
+class ReplyHandler<T> extends HandlerRegistration<T> implements Handler<Long> {
 
   private final EventBusImpl eventBus;
   private final ContextInternal context;
   private final Promise<Message<T>> result;
   private final long timeoutID;
+  private final long timeout;
   private final boolean src;
   private final String repliedAddress;
   Object trace;
@@ -38,14 +39,14 @@ class ReplyHandler<T> extends HandlerRegistration<T> {
     this.result = context.promise();
     this.src = src;
     this.repliedAddress = repliedAddress;
-    this.timeoutID = eventBus.vertx.setTimer(timeout, id -> {
-      fail(new ReplyException(ReplyFailure.TIMEOUT, "Timed out after waiting " + timeout + "(ms) for a reply. address: " + address + ", repliedAddress: " + repliedAddress));
-    });
+    this.timeoutID = eventBus.vertx.setTimer(timeout, this);
+    this.timeout = timeout;
   }
 
   private void trace(Object reply, Throwable failure) {
     VertxTracer tracer = context.tracer();
-    if (tracer != null && src) {
+    Object trace = this.trace;
+    if (tracer != null && src && trace != null) {
       tracer.receiveResponse(context, reply, trace, failure, TagExtractor.empty());
     }
   }
@@ -55,22 +56,29 @@ class ReplyHandler<T> extends HandlerRegistration<T> {
   }
 
   void fail(ReplyException failure) {
-    unregister(ar -> {});
+    if (eventBus.vertx.cancelTimer(timeoutID)) {
+      unregister();
+      doFail(failure);
+    }
+  }
+
+  private void doFail(ReplyException failure) {
+    trace(null, failure);
+    result.fail(failure);
     if (eventBus.metrics != null) {
       eventBus.metrics.replyFailure(repliedAddress, failure.failureType());
     }
-    trace(null, failure);
-    result.tryFail(failure);
   }
 
+  @Override
+  public void handle(Long id) {
+    unregister();
+    doFail(new ReplyException(ReplyFailure.TIMEOUT, "Timed out after waiting " + timeout + "(ms) for a reply. address: " + address + ", repliedAddress: " + repliedAddress));
+  }
 
   @Override
   protected boolean doReceive(Message<T> reply) {
-    try {
-      dispatch(null, reply, context);
-    } finally {
-      unregister();
-    }
+    dispatch(null, reply, context);
     return true;
   }
 
@@ -80,13 +88,14 @@ class ReplyHandler<T> extends HandlerRegistration<T> {
 
   @Override
   protected void dispatch(Message<T> reply, ContextInternal context, Handler<Message<T>> handler /* null */) {
-    eventBus.vertx.cancelTimer(timeoutID);
-    if (reply.body() instanceof ReplyException) {
-      // This is kind of clunky - but hey-ho
-      fail((ReplyException) reply.body());
-    } else {
-      trace(reply, null);
-      result.complete(reply);
+    if (eventBus.vertx.cancelTimer(timeoutID)) {
+      unregister();
+      if (reply.body() instanceof ReplyException) {
+        doFail((ReplyException) reply.body());
+      } else {
+        trace(reply, null);
+        result.complete(reply);
+      }
     }
   }
 }

@@ -23,9 +23,11 @@ import org.junit.Test;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 import static io.vertx.test.core.TestUtils.*;
+import static io.vertx.test.core.TestUtils.assertIndexOutOfBoundsException;
 import static org.junit.Assert.*;
 
 /**
@@ -1101,19 +1103,73 @@ public class BufferTest {
   }
 
   @Test
-  public void testDirect() {
-    Buffer buff = BufferImpl.directBuffer("hello world".getBytes());
-    assertEquals("hello world", buff.toString());
-    buff.appendString(" foobar");
-    assertEquals("hello world foobar", buff.toString());
-    ByteBuf bb = buff.getByteBuf().unwrap();
-    assertTrue(bb.isDirect());
-    assertTrue(bb.release());
-    try {
-      // Check it's deallocated
-      buff.toString();
-      fail();
-    } catch (IllegalReferenceCountException e) {
+  public void testAppendExpandsBufferWhenMaxCapacityReached() {
+    Buffer buff = Buffer.buffer(Unpooled.buffer(0, 8));
+    buff.appendString("Hello World");
+  }
+
+  @Test
+  public void testWriteExpandsBufferWhenMaxCapacityReached() {
+    String s = "Hello World";
+    ByteBuf byteBuf = Unpooled.buffer(0, s.length() - 1);
+    Buffer buff = Buffer.buffer(byteBuf);
+    int idx = 0;
+    for (byte b : s.getBytes()) {
+      buff.setByte(idx++, b);
     }
+  }
+
+  @Test
+  public void testSetByteAfterCurrentWriterIndexWithoutExpandingCapacity() {
+    ByteBuf byteBuf = Unpooled.buffer(10, Integer.MAX_VALUE);
+    byteBuf.writerIndex(5);
+    Buffer buff = Buffer.buffer(byteBuf);
+    buff.setByte(7, (byte)1);
+    assertEquals(8, buff.length());
+  }
+
+  @Test
+  public void testGetByteBuf() {
+    ByteBuf byteBuf = Unpooled.buffer();
+    byteBuf.writeCharSequence("Hello World", StandardCharsets.UTF_8);
+    Buffer buff = Buffer.buffer(byteBuf);
+    ByteBuf duplicate = buff.getByteBuf();
+    duplicate.writerIndex(5);
+    assertEquals(11, byteBuf.writerIndex());
+    assertEquals(1, duplicate.refCnt());
+    duplicate.release();
+    assertEquals(1, duplicate.refCnt());
+  }
+
+  @Test
+  public void testGetXXXUpperBound() {
+    checkGetXXXUpperBound((buff, idx) -> buff.getByte(idx), 1);
+    checkGetXXXUpperBound((buff, idx) -> buff.getUnsignedByte(idx), 1);
+    checkGetXXXUpperBound((buff, idx) -> buff.getShort(idx), 2);
+    checkGetXXXUpperBound((buff, idx) -> buff.getShortLE(idx), 2);
+    checkGetXXXUpperBound((buff, idx) -> buff.getUnsignedShort(idx), 2);
+    checkGetXXXUpperBound((buff, idx) -> buff.getUnsignedShortLE(idx), 2);
+    checkGetXXXUpperBound((buff, idx) -> buff.getMedium(idx), 3);
+    checkGetXXXUpperBound((buff, idx) -> buff.getMediumLE(idx), 3);
+    checkGetXXXUpperBound((buff, idx) -> buff.getUnsignedMedium(idx), 3);
+    checkGetXXXUpperBound((buff, idx) -> buff.getUnsignedMediumLE(idx), 3);
+    checkGetXXXUpperBound((buff, idx) -> buff.getInt(idx), 4);
+    checkGetXXXUpperBound((buff, idx) -> buff.getIntLE(idx), 4);
+    checkGetXXXUpperBound((buff, idx) -> buff.getUnsignedInt(idx), 4);
+    checkGetXXXUpperBound((buff, idx) -> buff.getUnsignedIntLE(idx), 4);
+    checkGetXXXUpperBound((buff, idx) -> buff.getLong(idx), 8);
+    checkGetXXXUpperBound((buff, idx) -> buff.getLongLE(idx), 8);
+    checkGetXXXUpperBound((buff, idx) -> buff.getFloat(idx), 4);
+    checkGetXXXUpperBound((buff, idx) -> buff.getDouble(idx), 8);
+  }
+
+  private <T> void checkGetXXXUpperBound(BiFunction<Buffer, Integer, T> f, int size) {
+    Buffer buffer = Buffer.buffer();
+    for (int i = 0;i < size;i++) {
+      buffer.appendByte((byte)0);
+    }
+    assertIndexOutOfBoundsException(() -> f.apply(buffer, -1));
+    f.apply(buffer, 0);
+    assertIndexOutOfBoundsException(() -> f.apply(buffer, 1));
   }
 }

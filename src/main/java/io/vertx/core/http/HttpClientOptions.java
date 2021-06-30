@@ -16,6 +16,7 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.impl.Arguments;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.*;
+import io.vertx.core.tracing.TracingPolicy;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -96,6 +97,11 @@ public class HttpClientOptions extends ClientOptionsBase {
    * worth of data
    */
   public static final int DEFAULT_MAX_WEBSOCKET_MESSAGE_SIZE = 65536 * 4;
+
+  /**
+   * The default value for the maximum number of WebSocket = 50
+   */
+  public static final int DEFAULT_MAX_WEBSOCKETS = 50;
 
   /**
    * The default value for host name = "localhost"
@@ -192,6 +198,16 @@ public class HttpClientOptions extends ClientOptionsBase {
    */
   public static final int DEFAULT_POOL_CLEANER_PERIOD = 1000;
 
+  /**
+   * Default WebSocket closing timeout = 10 second
+   */
+  public static final int DEFAULT_WEBSOCKET_CLOSING_TIMEOUT = 10;
+
+  /**
+   * Default tracing control = {@link TracingPolicy#PROPAGATE}
+   */
+  public static final TracingPolicy DEFAULT_TRACING_POLICY = TracingPolicy.PROPAGATE;
+
   private boolean verifyHost = true;
   private int maxPoolSize;
   private boolean keepAlive;
@@ -207,6 +223,7 @@ public class HttpClientOptions extends ClientOptionsBase {
   private boolean tryUseCompression;
   private int maxWebSocketFrameSize;
   private int maxWebSocketMessageSize;
+  private int maxWebSockets;
   private String defaultHost;
   private int defaultPort;
   private HttpVersion protocolVersion;
@@ -227,7 +244,9 @@ public class HttpClientOptions extends ClientOptionsBase {
   private int webSocketCompressionLevel;
   private boolean webSocketAllowClientNoContext;
   private boolean webSocketRequestServerNoContext;
+  private int webSocketClosingTimeout;
 
+  private TracingPolicy tracingPolicy;
 
   /**
    * Default constructor
@@ -257,6 +276,7 @@ public class HttpClientOptions extends ClientOptionsBase {
     this.tryUseCompression = other.isTryUseCompression();
     this.maxWebSocketFrameSize = other.maxWebSocketFrameSize;
     this.maxWebSocketMessageSize = other.maxWebSocketMessageSize;
+    this.maxWebSockets = other.maxWebSockets;
     this.defaultHost = other.defaultHost;
     this.defaultPort = other.defaultPort;
     this.protocolVersion = other.protocolVersion;
@@ -277,6 +297,8 @@ public class HttpClientOptions extends ClientOptionsBase {
     this.webSocketAllowClientNoContext = other.webSocketAllowClientNoContext;
     this.webSocketCompressionLevel = other.webSocketCompressionLevel;
     this.webSocketRequestServerNoContext = other.webSocketRequestServerNoContext;
+    this.webSocketClosingTimeout = other.webSocketClosingTimeout;
+    this.tracingPolicy = other.tracingPolicy;
   }
 
   /**
@@ -315,6 +337,7 @@ public class HttpClientOptions extends ClientOptionsBase {
     tryUseCompression = DEFAULT_TRY_USE_COMPRESSION;
     maxWebSocketFrameSize = DEFAULT_MAX_WEBSOCKET_FRAME_SIZE;
     maxWebSocketMessageSize = DEFAULT_MAX_WEBSOCKET_MESSAGE_SIZE;
+    maxWebSockets = DEFAULT_MAX_WEBSOCKETS;
     defaultHost = DEFAULT_DEFAULT_HOST;
     defaultPort = DEFAULT_DEFAULT_PORT;
     protocolVersion = DEFAULT_PROTOCOL_VERSION;
@@ -334,7 +357,9 @@ public class HttpClientOptions extends ClientOptionsBase {
     webSocketCompressionLevel = DEFAULT_WEBSOCKET_COMPRESSION_LEVEL;
     webSocketAllowClientNoContext = DEFAULT_WEBSOCKET_ALLOW_CLIENT_NO_CONTEXT;
     webSocketRequestServerNoContext = DEFAULT_WEBSOCKET_REQUEST_SERVER_NO_CONTEXT;
+    webSocketClosingTimeout = DEFAULT_WEBSOCKET_CLOSING_TIMEOUT;
     poolCleanerPeriod = DEFAULT_POOL_CLEANER_PERIOD;
+    tracingPolicy = DEFAULT_TRACING_POLICY;
   }
 
   @Override
@@ -830,6 +855,29 @@ public class HttpClientOptions extends ClientOptionsBase {
   }
 
   /**
+   * Get the maximum of WebSockets per endpoint.
+   *
+   * @return  the max number of WebSockets
+   */
+  public int getMaxWebSockets() {
+    return maxWebSockets;
+  }
+
+  /**
+   * Set the max number of WebSockets per endpoint.
+   *
+   * @param maxWebSockets  the max value
+   * @return a reference to this, so the API can be used fluently
+   */
+  public HttpClientOptions setMaxWebSockets(int maxWebSockets) {
+    if (maxWebSockets == 0 || maxWebSockets < -1) {
+      throw new IllegalArgumentException("maxWebSockets must be > 0 or -1 (disabled)");
+    }
+    this.maxWebSockets = maxWebSockets;
+    return this;
+  }
+
+  /**
    * Get the default host name to be used by this client in requests if none is provided when making the request.
    *
    * @return  the default host name
@@ -1091,6 +1139,16 @@ public class HttpClientOptions extends ClientOptionsBase {
   }
 
   @Override
+  public HttpClientOptions setNonProxyHosts(List<String> nonProxyHosts) {
+    return (HttpClientOptions) super.setNonProxyHosts(nonProxyHosts);
+  }
+
+  @Override
+  public HttpClientOptions addNonProxyHost(String nonProxyHost) {
+    return (HttpClientOptions) super.addNonProxyHost(nonProxyHost);
+  }
+
+  @Override
   public HttpClientOptions setLocalAddress(String localAddress) {
     return (HttpClientOptions) super.setLocalAddress(localAddress);
   }
@@ -1195,6 +1253,31 @@ public class HttpClientOptions extends ClientOptionsBase {
   }
 
   /**
+   * @return the amount of time (in seconds) a client WebSocket will wait until it closes TCP connection after receiving a close frame
+   */
+  public int getWebSocketClosingTimeout() {
+    return webSocketClosingTimeout;
+  }
+
+  /**
+   * Set the amount of time a client WebSocket will wait until it closes the TCP connection after receiving a close frame.
+   *
+   * <p> When a WebSocket is closed, the server should close the TCP connection. This timeout will close
+   * the TCP connection on the client when it expires.
+   *
+   * <p> Set to {@code 0L} closes the TCP connection immediately after receiving the close frame.
+   *
+   * <p> Set to a negative value to disable it.
+   *
+   * @param webSocketClosingTimeout the timeout is seconds
+   * @return a reference to this, so the API can be used fluently
+   */
+  public HttpClientOptions setWebSocketClosingTimeout(int webSocketClosingTimeout) {
+    this.webSocketClosingTimeout = webSocketClosingTimeout;
+    return this;
+  }
+
+  /**
    * @return the initial buffer size for the HTTP decoder
    */
   public int getDecoderInitialBufferSize() { return decoderInitialBufferSize; }
@@ -1227,6 +1310,24 @@ public class HttpClientOptions extends ClientOptionsBase {
    */
   public HttpClientOptions setPoolCleanerPeriod(int poolCleanerPeriod) {
     this.poolCleanerPeriod = poolCleanerPeriod;
+    return this;
+  }
+
+  /**
+   * @return the tracing policy
+   */
+  public TracingPolicy getTracingPolicy() {
+    return tracingPolicy;
+  }
+
+  /**
+   * Set the tracing policy for the client behavior when Vert.x has tracing enabled.
+   *
+   * @param tracingPolicy the tracing policy
+   * @return a reference to this, so the API can be used fluently
+   */
+  public HttpClientOptions setTracingPolicy(TracingPolicy tracingPolicy) {
+    this.tracingPolicy = tracingPolicy;
     return this;
   }
 }

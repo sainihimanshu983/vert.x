@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2019 Contributors to the Eclipse Foundation
+ * Copyright (c) 2011-2021 Contributors to the Eclipse Foundation
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License 2.0 which is available at
@@ -13,6 +13,7 @@ package io.vertx.core.impl;
 
 import io.vertx.codegen.annotations.Nullable;
 import io.vertx.core.*;
+import io.vertx.core.impl.future.PromiseInternal;
 import io.vertx.core.spi.metrics.Metrics;
 import io.vertx.core.spi.metrics.MetricsProvider;
 import io.vertx.core.spi.metrics.PoolMetrics;
@@ -23,13 +24,13 @@ import io.vertx.core.spi.metrics.PoolMetrics;
 class WorkerExecutorImpl implements MetricsProvider, WorkerExecutorInternal {
 
   private final VertxInternal vertx;
-  private final CloseHooks closeHooks;
+  private final CloseFuture closeFuture;
   private final VertxImpl.SharedWorkerPool pool;
   private boolean closed;
 
-  public WorkerExecutorImpl(VertxInternal vertx, CloseHooks closeHooks, VertxImpl.SharedWorkerPool pool) {
+  public WorkerExecutorImpl(VertxInternal vertx, CloseFuture closeFuture, VertxImpl.SharedWorkerPool pool) {
     this.vertx = vertx;
-    this.closeHooks = closeHooks;
+    this.closeFuture = closeFuture;
     this.pool = pool;
   }
 
@@ -60,7 +61,7 @@ class WorkerExecutorImpl implements MetricsProvider, WorkerExecutorInternal {
       throw new IllegalStateException("Worker executor closed");
     }
     ContextInternal context = (ContextInternal) vertx.getOrCreateContext();
-    ContextImpl impl = context instanceof ContextImpl.Duplicated ? ((ContextImpl.Duplicated)context).delegate : (ContextImpl) context;
+    ContextImpl impl = context instanceof DuplicatedContext ? ((DuplicatedContext)context).delegate : (ContextImpl) context;
     return ContextImpl.executeBlocking(context, blockingCodeHandler, pool, ordered ? impl.orderedTasks : null);
   }
 
@@ -79,12 +80,17 @@ class WorkerExecutorImpl implements MetricsProvider, WorkerExecutorInternal {
   }
 
   @Override
+  public void close(Handler<AsyncResult<Void>> handler) {
+    close().onComplete(handler);
+  }
+
+  @Override
   public void close(Promise<Void> completion) {
     synchronized (this) {
       if (!closed) {
         closed = true;
-        closeHooks.remove(this);
-        pool.release();
+        closeFuture.remove(this);
+        pool.close();
       }
     }
     completion.complete();

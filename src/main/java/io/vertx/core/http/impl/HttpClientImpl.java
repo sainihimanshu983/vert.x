@@ -12,34 +12,33 @@
 package io.vertx.core.http.impl;
 
 import io.netty.channel.group.ChannelGroup;
-import io.netty.channel.group.ChannelGroupFuture;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.vertx.core.Closeable;
-import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.MultiMap;
 import io.vertx.core.*;
-import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.*;
 import io.vertx.core.impl.CloseFuture;
-import io.vertx.core.net.impl.clientconnection.ConnectionManager;
+import io.vertx.core.impl.EventLoopContext;
+import io.vertx.core.net.NetClientOptions;
+import io.vertx.core.net.impl.NetClientImpl;
+import io.vertx.core.net.impl.ProxyFilter;
+import io.vertx.core.net.impl.pool.ConnectionManager;
 import io.vertx.core.impl.ContextInternal;
-import io.vertx.core.impl.PromiseInternal;
+import io.vertx.core.impl.future.PromiseInternal;
 import io.vertx.core.impl.VertxInternal;
 import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
-import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.ProxyOptions;
 import io.vertx.core.net.ProxyType;
 import io.vertx.core.net.SocketAddress;
-import io.vertx.core.net.impl.SSLHelper;
-import io.vertx.core.net.impl.clientconnection.Endpoint;
+import io.vertx.core.net.impl.pool.Endpoint;
+import io.vertx.core.net.impl.pool.Lease;
 import io.vertx.core.spi.metrics.ClientMetrics;
 import io.vertx.core.spi.metrics.HttpClientMetrics;
 import io.vertx.core.spi.metrics.Metrics;
 import io.vertx.core.spi.metrics.MetricsProvider;
-import io.vertx.core.streams.ReadStream;
 
 import java.lang.ref.WeakReference;
 import java.net.URI;
@@ -51,7 +50,11 @@ import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import static io.vertx.core.http.HttpHeaders.CONTENT_LENGTH;
 
 /**
  *
@@ -64,12 +67,12 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
   // Pattern to check we are not dealing with an absoluate URI
   private static final Pattern ABS_URI_START_PATTERN = Pattern.compile("^\\p{Alpha}[\\p{Alpha}\\p{Digit}+.\\-]*:");
 
-  private final Function<HttpClientResponse, Future<HttpClientRequest>> DEFAULT_HANDLER = resp -> {
+  private static final Function<HttpClientResponse, Future<RequestOptions>> DEFAULT_HANDLER = resp -> {
     try {
       int statusCode = resp.statusCode();
       String location = resp.getHeader(HttpHeaders.LOCATION);
       if (location != null && (statusCode == 301 || statusCode == 302 || statusCode == 303 || statusCode == 307 || statusCode == 308)) {
-        HttpMethod m = resp.request().method();
+        HttpMethod m = resp.request().getMethod();
         if (statusCode == 303) {
           m = HttpMethod.GET;
         } else if (m != HttpMethod.GET && m != HttpMethod.HEAD) {
@@ -94,11 +97,22 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
           return null;
         }
         String requestURI = uri.getPath();
+        if (requestURI == null || requestURI.isEmpty()) {
+          requestURI = "/";
+        }
         String query = uri.getQuery();
         if (query != null) {
           requestURI += "?" + query;
         }
-        return Future.succeededFuture(createRequest(m, null, uri.getHost(), port, ssl, requestURI, null));
+        RequestOptions options = new RequestOptions();
+        options.setMethod(m);
+        options.setHost(uri.getHost());
+        options.setPort(port);
+        options.setSsl(ssl);
+        options.setURI(requestURI);
+        options.setHeaders(resp.request().headers());
+        options.removeHeader(CONTENT_LENGTH);
+        return Future.succeededFuture(options);
       }
       return null;
     } catch (Exception e) {
@@ -107,23 +121,23 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
   };
 
   private static final Logger log = LoggerFactory.getLogger(HttpClientImpl.class);
-  private static final Consumer<Endpoint<HttpClientConnection>> EXPIRED_CHECKER = endpoint -> ((ClientHttpStreamEndpoint)endpoint).checkExpired();
+  private static final Consumer<Endpoint<Lease<HttpClientConnection>>> EXPIRED_CHECKER = endpoint -> ((ClientHttpEndpointBase)endpoint).checkExpired();
 
 
   private final VertxInternal vertx;
   private final ChannelGroup channelGroup;
   private final HttpClientOptions options;
   private final ConnectionManager<EndpointKey, HttpClientConnection> webSocketCM;
-  private final ConnectionManager<EndpointKey, HttpClientConnection> httpCM;
-  private final ProxyType proxyType;
-  private final SSLHelper sslHelper;
+  private final ConnectionManager<EndpointKey, Lease<HttpClientConnection>> httpCM;
+  private final NetClientImpl netClient;
   private final HttpClientMetrics metrics;
   private final boolean keepAlive;
   private final boolean pipelining;
   private final CloseFuture closeFuture;
   private long timerID;
+  private Predicate<SocketAddress> proxyFilter;
   private volatile Handler<HttpConnection> connectionHandler;
-  private volatile Function<HttpClientResponse, Future<HttpClientRequest>> redirectHandler = DEFAULT_HANDLER;
+  private volatile Function<HttpClientResponse, Future<RequestOptions>> redirectHandler = DEFAULT_HANDLER;
 
   public HttpClientImpl(VertxInternal vertx, HttpClientOptions options, CloseFuture closeFuture) {
     this.vertx = vertx;
@@ -144,22 +158,29 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
     }
     this.keepAlive = options.isKeepAlive();
     this.pipelining = options.isPipelining();
-    this.sslHelper = new SSLHelper(options, options.getKeyCertOptions(), options.getTrustOptions()).
-        setApplicationProtocols(alpnVersions);
-    sslHelper.validate(vertx);
-    if(options.getProtocolVersion() == HttpVersion.HTTP_2 && Context.isOnWorkerThread()) {
-      throw new IllegalStateException("Cannot use HttpClient with HTTP_2 in a worker");
-    }
     if (!keepAlive && pipelining) {
       throw new IllegalStateException("Cannot have pipelining with no keep alive");
     }
+    this.proxyFilter = options.getNonProxyHosts() != null ? ProxyFilter.nonProxyHosts(options.getNonProxyHosts()) : ProxyFilter.DEFAULT_PROXY_FILTER;
+    this.netClient = new NetClientImpl(
+      vertx,
+      new NetClientOptions(options)
+        .setHostnameVerificationAlgorithm(options.isVerifyHost() ? "HTTPS": "")
+        .setProxyOptions(null)
+        .setApplicationLayerProtocols(alpnVersions
+          .stream()
+          .map(HttpVersion::alpnName)
+          .collect(Collectors.toList())),
+      closeFuture);
     webSocketCM = webSocketConnectionManager();
     httpCM = httpConnectionManager();
-    proxyType = options.getProxyOptions() != null ? options.getProxyOptions().getType() : null;
     if (options.getPoolCleanerPeriod() > 0 && (options.getKeepAliveTimeout() > 0L || options.getHttp2KeepAliveTimeout() > 0L)) {
       PoolChecker checker = new PoolChecker(this);
       timerID = vertx.setTimer(options.getPoolCleanerPeriod(), checker);
     }
+
+    closeFuture.add(netClient);
+    closeFuture.add(this);
   }
 
   /**
@@ -191,53 +212,80 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
     }
   }
 
-  private ConnectionManager<EndpointKey, HttpClientConnection> httpConnectionManager() {
-    long maxSize = options.getMaxPoolSize() * options.getHttp2MaxPoolSize();
+  private ConnectionManager<EndpointKey, Lease<HttpClientConnection>> httpConnectionManager() {
     int maxPoolSize = Math.max(options.getMaxPoolSize(), options.getHttp2MaxPoolSize());
     return new ConnectionManager<>((key, ctx, dispose) -> {
-      String host;
-      int port;
-      if (key.serverAddr.isInetSocket()) {
-        host = key.serverAddr.host();
-        port = key.serverAddr.port();
-      } else {
-        host = key.serverAddr.path();
-        port = 0;
-      }
       ClientMetrics metrics = this.metrics != null ? this.metrics.createEndpointMetrics(key.serverAddr, maxPoolSize) : null;
-      HttpChannelConnector connector = new HttpChannelConnector(this, channelGroup, ctx, metrics, options.getProtocolVersion(), key.ssl, key.peerAddr, key.serverAddr);
-      return new ClientHttpStreamEndpoint(metrics, metrics, options.getMaxWaitQueueSize(), maxSize, host, port, ctx, connector, dispose);
+      HttpChannelConnector connector = new HttpChannelConnector(this, netClient, key.proxyOptions, metrics, options.getProtocolVersion(), key.ssl, options.isUseAlpn(), key.peerAddr, key.serverAddr);
+      return new SharedClientHttpStreamEndpoint(
+        this,
+        metrics,
+        options.getMaxWaitQueueSize(),
+        options.getMaxPoolSize(),
+        options.getHttp2MaxPoolSize(),
+        connector,
+        dispose);
     });
   }
 
   private ConnectionManager<EndpointKey, HttpClientConnection> webSocketConnectionManager() {
-    int maxPoolSize = options.getMaxPoolSize();
+    int maxPoolSize = options.getMaxWebSockets();
     return new ConnectionManager<>((key, ctx, dispose) -> {
-      String host;
-      int port;
-      if (key.serverAddr.isInetSocket()) {
-        host = key.serverAddr.host();
-        port = key.serverAddr.port();
-      } else {
-        host = key.serverAddr.path();
-        port = 0;
-      }
       ClientMetrics metrics = this.metrics != null ? this.metrics.createEndpointMetrics(key.serverAddr, maxPoolSize) : null;
-      HttpChannelConnector connector = new HttpChannelConnector(this, channelGroup, ctx, metrics, HttpVersion.HTTP_1_1, key.ssl, key.peerAddr, key.serverAddr);
-      return new WebSocketEndpoint(null, port, host, metrics, maxPoolSize, connector, dispose);
+      HttpChannelConnector connector = new HttpChannelConnector(this, netClient, key.proxyOptions, metrics, HttpVersion.HTTP_1_1, key.ssl, false, key.peerAddr, key.serverAddr);
+      return new WebSocketEndpoint(null, maxPoolSize, connector, dispose);
     });
   }
 
-  private int getPort(Integer port) {
-    return port != null ? port : options.getDefaultPort();
+  private int getPort(RequestOptions request) {
+    Integer port = request.getPort();
+    if (port != null) {
+      return port;
+    }
+    SocketAddress server = request.getServer();
+    if (server != null && server.isInetSocket()) {
+      return server.port();
+    }
+    return options.getDefaultPort();
   }
 
-  private String getHost(String host) {
-    return host != null ? host : options.getDefaultHost();
+  private ProxyOptions getProxyOptions(ProxyOptions proxyOptions) {
+    if (proxyOptions == null) {
+      proxyOptions = options.getProxyOptions();
+    }
+    return proxyOptions;
+  }
+
+  private String getHost(RequestOptions request) {
+    String host = request.getHost();
+    if (host != null) {
+      return host;
+    }
+    SocketAddress server = request.getServer();
+    if (server != null && server.isInetSocket()) {
+      return server.host();
+    }
+    return options.getDefaultHost();
   }
 
   HttpClientMetrics metrics() {
     return metrics;
+  }
+
+  /**
+   * Connect to a server.
+   */
+  public Future<HttpClientConnection> connect(SocketAddress server) {
+    return connect(server, null);
+  }
+
+  /**
+   * Connect to a server.
+   */
+  public Future<HttpClientConnection> connect(SocketAddress server, SocketAddress peer) {
+    EventLoopContext context = (EventLoopContext) vertx.getOrCreateContext();
+    HttpChannelConnector connector = new HttpChannelConnector(this, netClient, null, null, options.getProtocolVersion(), options.isSsl(), options.isUseAlpn(), peer, server);
+    return connector.httpConnect(context);
   }
 
   @Override
@@ -246,17 +294,30 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
   }
 
   private void webSocket(WebSocketConnectOptions connectOptions, PromiseInternal<WebSocket> promise) {
-    int port = getPort(connectOptions.getPort());
-    String host = getHost(connectOptions.getHost());
+    ProxyOptions proxyOptions = getProxyOptions(connectOptions.getProxyOptions());
+    int port = getPort(connectOptions);
+    String host = getHost(connectOptions);
     SocketAddress addr = SocketAddress.inetSocketAddress(port, host);
-    EndpointKey key = new EndpointKey(connectOptions.isSsl() != null ? connectOptions.isSsl() : options.isSsl(), addr, addr);
+    if (proxyFilter != null) {
+      if (!proxyFilter.test(addr)) {
+        proxyOptions = null;
+      }
+    }
+    EndpointKey key = new EndpointKey(connectOptions.isSsl() != null ? connectOptions.isSsl() : options.isSsl(), proxyOptions, addr, addr);
+    ContextInternal ctx = promise.context();
+    EventLoopContext eventLoopContext;
+    if (ctx instanceof EventLoopContext) {
+      eventLoopContext = (EventLoopContext) ctx;
+    } else {
+      eventLoopContext = vertx.createEventLoopContext(ctx.nettyEventLoop(), ctx.workerPool(), ctx.classLoader());
+    }
     webSocketCM.getConnection(
-      (ContextInternal) promise.future().context(),
+      eventLoopContext,
       key,
       ar -> {
         if (ar.succeeded()) {
           Http1xClientConnection conn = (Http1xClientConnection) ar.result();
-          conn.toWebSocket(connectOptions.getURI(), connectOptions.getHeaders(), connectOptions.getVersion(), connectOptions.getSubProtocols(), HttpClientImpl.this.options.getMaxWebSocketFrameSize(), promise);
+          conn.toWebSocket(ctx, connectOptions.getURI(), connectOptions.getHeaders(), connectOptions.getVersion(), connectOptions.getSubProtocols(), HttpClientImpl.this.options.getMaxWebSocketFrameSize(), promise);
         } else {
           promise.fail(ar.cause());
         }
@@ -349,858 +410,48 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
   }
 
   @Override
-  public void send(RequestOptions options, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options, (Buffer) null, responseHandler);
+  public void request(RequestOptions options, Handler<AsyncResult<HttpClientRequest>> handler) {
+    ContextInternal ctx = vertx.getOrCreateContext();
+    PromiseInternal<HttpClientRequest> promise = ctx.promise(handler);
+    doRequest(options, promise);
   }
 
   @Override
-  public Future<HttpClientResponse> send(RequestOptions options) {
-    return send(options, (Buffer) null);
-  }
-
-  @Override
-  public void send(RequestOptions options, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options.getMethod(), getHost(options.getHost()), getPort(options.getPort()), options.getURI(), options.getHeaders(), options.isSsl(), options.getFollowRedirects(), options.getTimeout(), body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(RequestOptions options, ReadStream<Buffer> body) {
-    return send(options.getMethod(), getHost(options.getHost()), getPort(options.getPort()), options.getURI(), options.getHeaders(), options.isSsl(), options.getFollowRedirects(), options.getTimeout(), body);
-  }
-
-  @Override
-  public void send(RequestOptions options, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options.getMethod(), getHost(options.getHost()), getPort(options.getPort()), options.getURI(), options.getHeaders(), options.isSsl(), options.getFollowRedirects(), options.getTimeout(), body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(RequestOptions options, Buffer body) {
-    return send(options.getMethod(), getHost(options.getHost()), getPort(options.getPort()), options.getURI(), options.getHeaders(), options.isSsl(), options.getFollowRedirects(), options.getTimeout(), body);
-  }
-
-  @Override
-  public void send(HttpMethod method, int port, String host, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, port, host, requestURI, headers, (Buffer) null, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, int port, String host, String requestURI, MultiMap headers) {
-    return send(method, port, host, requestURI, headers, (Buffer) null);
-  }
-
-  @Override
-  public void send(HttpMethod method, int port, String host, String requestURI, MultiMap headers, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, host, port, requestURI, headers, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, int port, String host, String requestURI, MultiMap headers, Buffer body) {
-    return send(method, host, port, requestURI, headers, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, int port, String host, String requestURI, MultiMap headers, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, host, port, requestURI, headers, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, int port, String host, String requestURI, MultiMap headers, ReadStream<Buffer> body) {
-    return send(method, host, port, requestURI, headers, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, int port, String host, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, port, host, requestURI, (Buffer) null, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, int port, String host, String requestURI) {
-    return send(method, port, host, requestURI, (Buffer) null);
-  }
-
-  @Override
-  public void send(HttpMethod method, int port, String host, String requestURI, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, host, port, requestURI, null, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, int port, String host, String requestURI, ReadStream<Buffer> body) {
-    return send(method, host, port, requestURI, null, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, int port, String host, String requestURI, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, host, port, requestURI, null, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, int port, String host, String requestURI, Buffer body) {
-    return send(method, host, port, requestURI, null, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, String host, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, host, requestURI, headers, (Buffer) null, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String host, String requestURI, MultiMap headers) {
-    return send(method, host, requestURI, headers, (Buffer) null);
-  }
-
-  @Override
-  public void send(HttpMethod method, String host, String requestURI, MultiMap headers, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, host, options.getDefaultPort(), requestURI, headers, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String host, String requestURI, MultiMap headers, Buffer body) {
-    return send(method, host, options.getDefaultPort(), requestURI, headers, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, String host, String requestURI, MultiMap headers, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, host, options.getDefaultPort(), requestURI, headers, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String host, String requestURI, MultiMap headers, ReadStream<Buffer> body) {
-    return send(method, host, options.getDefaultPort(), requestURI, headers, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, String host, String requestURI, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, host, options.getDefaultPort(), requestURI, null, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String host, String requestURI, Buffer body) {
-    return send(method, host, options.getDefaultPort(), requestURI, null, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, String host, String requestURI, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, host, options.getDefaultPort(), requestURI, null, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String host, String requestURI, ReadStream<Buffer> body) {
-    return send(method, host, options.getDefaultPort(), requestURI, null, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, String host, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, host, options.getDefaultPort(), requestURI, null, null, false, 0, null, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String host, String requestURI) {
-    return send(method, host, options.getDefaultPort(), requestURI, null, null, false, 0, null);
-  }
-
-  @Override
-  public void send(HttpMethod method, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, requestURI, headers, (Buffer) null, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String requestURI, MultiMap headers) {
-    return send(method, requestURI, headers, (Buffer) null);
-  }
-
-  @Override
-  public void send(HttpMethod method, String requestURI, MultiMap headers, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, options.getDefaultHost(), options.getDefaultPort(), requestURI, headers, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String requestURI, MultiMap headers, Buffer body) {
-    return send(method, options.getDefaultHost(), options.getDefaultPort(), requestURI, headers, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, String requestURI, MultiMap headers, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, options.getDefaultHost(), options.getDefaultPort(), requestURI, headers, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String requestURI, MultiMap headers, ReadStream<Buffer> body) {
-    return send(method, options.getDefaultHost(), options.getDefaultPort(), requestURI, headers, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, String requestURI, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, options.getDefaultHost(), options.getDefaultPort(), requestURI, null, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String requestURI, Buffer body) {
-    return send(method, options.getDefaultHost(), options.getDefaultPort(), requestURI, null, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, String requestURI, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, options.getDefaultHost(), options.getDefaultPort(), requestURI, null, null, false, 0, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String requestURI, ReadStream<Buffer> body) {
-    return send(method, options.getDefaultHost(), options.getDefaultPort(), requestURI, null, null, false, 0, body);
-  }
-
-  @Override
-  public void send(HttpMethod method, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(method, options.getDefaultHost(), options.getDefaultPort(), requestURI, null, null, false, 0, null, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> send(HttpMethod method, String requestURI) {
-    return send(method, options.getDefaultHost(), options.getDefaultPort(), requestURI, null, null, false, 0, null);
-  }
-
-  private void send(HttpMethod method,
-                    String host,
-                    int port,
-                    String requestURI,
-                    MultiMap headers,
-                    Boolean ssl,
-                    boolean followRedirects,
-                    long timeout,
-                    Object body,
-                    Handler<AsyncResult<HttpClientResponse>> handler) {
-    send(method, host, port, requestURI, headers, ssl, followRedirects, timeout, body, vertx.promise(handler));
-  }
-
-  private Future<HttpClientResponse> send(HttpMethod method,
-                                          String host,
-                                          int port,
-                                          String requestURI,
-                                          MultiMap headers,
-                                          Boolean ssl,
-                                          boolean followRedirects,
-                                          long timeout,
-                                          Object body) {
-    Promise<HttpClientResponse> promise = vertx.promise();
-    send(method, host, port, requestURI, headers, ssl, followRedirects, timeout, body, promise);
+  public Future<HttpClientRequest> request(RequestOptions options) {
+    ContextInternal ctx = vertx.getOrCreateContext();
+    PromiseInternal<HttpClientRequest> promise = ctx.promise();
+    doRequest(options, promise);
     return promise.future();
   }
 
-  private void send(HttpMethod method,
-                    String host,
-                    int port,
-                    String requestURI,
-                    MultiMap headers,
-                    Boolean ssl,
-                    boolean followRedirects,
-                    long timeout,
-                    Object body,
-                    PromiseInternal<HttpClientResponse> responsePromise) {
-    HttpClientRequestBase req = createRequest(method, null, host, port, ssl, requestURI, headers, responsePromise);
-    req.setFollowRedirects(followRedirects);
-    if (body instanceof Buffer) {
-      req.end((Buffer) body);
-    } else if (body instanceof ReadStream<?>) {
-      ReadStream<Buffer> stream = (ReadStream<Buffer>) body;
-      if (headers == null || !headers.contains(HttpHeaders.CONTENT_LENGTH)) {
-        req.setChunked(true);
-      }
-      stream.pipeTo(req);
-    } else {
-      req.end();
-    }
-    if (timeout > 0) {
-      req.setTimeout(timeout);
-    }
+  @Override
+  public void request(HttpMethod method, int port, String host, String requestURI, Handler<AsyncResult<HttpClientRequest>> handler) {
+    request(new RequestOptions().setMethod(method).setPort(port).setHost(host).setURI(requestURI), handler);
   }
 
   @Override
-  public HttpClientRequest request(HttpMethod method, String requestURI) {
-    return request(method, options.getDefaultPort(), options.getDefaultHost(), requestURI);
+  public Future<HttpClientRequest> request(HttpMethod method, int port, String host, String requestURI) {
+    return request(new RequestOptions().setMethod(method).setPort(port).setHost(host).setURI(requestURI));
   }
 
   @Override
-  public HttpClientRequest request(HttpMethod method, int port, String host, String requestURI) {
-    return createRequest(method, null, host, port, null, requestURI, null);
+  public void request(HttpMethod method, String host, String requestURI, Handler<AsyncResult<HttpClientRequest>> handler) {
+    request(method, options.getDefaultPort(), host, requestURI, handler);
   }
 
   @Override
-  public HttpClientRequest request(HttpMethod method, SocketAddress serverAddress, int port, String host, String requestURI) {
-    return createRequest(method, serverAddress, host, port, null, requestURI, null);
-  }
-
-  @Override
-  public HttpClientRequest request(SocketAddress serverAddress, RequestOptions options) {
-    return createRequest(options.getMethod(), serverAddress, getHost(options.getHost()), getPort(options.getPort()), options.isSsl(), options.getURI(), null);
-  }
-
-  @Override
-  public HttpClientRequest request(RequestOptions options) {
-    return createRequest(options.getMethod(), null, getHost(options.getHost()), getPort(options.getPort()), options.isSsl(), options.getURI(), options.getHeaders());
-  }
-
-  @Override
-  public HttpClientRequest request(HttpMethod method, String host, String requestURI) {
+  public Future<HttpClientRequest> request(HttpMethod method, String host, String requestURI) {
     return request(method, options.getDefaultPort(), host, requestURI);
   }
 
   @Override
-  public void get(int port, String host, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.GET, port, host, requestURI, headers, responseHandler);
+  public void request(HttpMethod method, String requestURI, Handler<AsyncResult<HttpClientRequest>> handler) {
+    request(method, options.getDefaultPort(), options.getDefaultHost(), requestURI, handler);
   }
 
   @Override
-  public Future<HttpClientResponse> get(int port, String host, String requestURI, MultiMap headers) {
-    return send(HttpMethod.GET, port, host, requestURI, headers);
-  }
-
-  @Override
-  public void get(String host, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.GET, host, requestURI, headers, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> get(String host, String requestURI, MultiMap headers) {
-    return send(HttpMethod.GET, host, requestURI, headers);
-  }
-
-  @Override
-  public void get(String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.GET, requestURI, headers, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> get(String requestURI, MultiMap headers) {
-    return send(HttpMethod.GET, requestURI, headers);
-  }
-
-  @Override
-  public void get(RequestOptions options, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options.setMethod(HttpMethod.GET), responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> get(RequestOptions options) {
-    return send(options.setMethod(HttpMethod.GET));
-  }
-
-  @Override
-  public void get(int port, String host, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.GET, port, host, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> get(int port, String host, String requestURI) {
-    return send(HttpMethod.GET, port, host, requestURI);
-  }
-
-  @Override
-  public void get(String host, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.GET, host, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> get(String host, String requestURI) {
-    return send(HttpMethod.GET, host, requestURI);
-  }
-
-  @Override
-  public void get(String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.GET, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> get(String requestURI) {
-    return send(HttpMethod.GET, requestURI);
-  }
-
-  @Override
-  public void post(int port, String host, String requestURI, MultiMap headers, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, port, host, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(int port, String host, String requestURI, MultiMap headers, Buffer body) {
-    return send(HttpMethod.POST, port, host, requestURI, headers, body);
-  }
-
-  @Override
-  public void post(int port, String host, String requestURI, MultiMap headers, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, port, host, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(int port, String host, String requestURI, MultiMap headers, ReadStream<Buffer> body) {
-    return send(HttpMethod.POST, port, host, requestURI, headers, body);
-  }
-
-  @Override
-  public void post(String host, String requestURI, MultiMap headers, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, host, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(String host, String requestURI, MultiMap headers, Buffer body) {
-    return send(HttpMethod.POST, host, requestURI, headers, body);
-  }
-
-  @Override
-  public void post(String host, String requestURI, MultiMap headers, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, host, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(String host, String requestURI, MultiMap headers, ReadStream<Buffer> body) {
-    return send(HttpMethod.POST, host, requestURI, headers, body);
-  }
-
-  @Override
-  public void post(String requestURI, MultiMap headers, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(String requestURI, MultiMap headers, Buffer body) {
-    return send(HttpMethod.POST, requestURI, headers, body);
-  }
-
-  @Override
-  public void post(String requestURI, MultiMap headers, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(String requestURI, MultiMap headers, ReadStream<Buffer> body) {
-    return send(HttpMethod.POST, requestURI, headers, body);
-  }
-
-  @Override
-  public void post(RequestOptions options, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options.setMethod(HttpMethod.POST), body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(RequestOptions options, Buffer body) {
-    return send(options.setMethod(HttpMethod.POST), body);
-  }
-
-  @Override
-  public void post(RequestOptions options, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options.setMethod(HttpMethod.POST), body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(RequestOptions options, ReadStream<Buffer> body) {
-    return send(options.setMethod(HttpMethod.POST), body);
-  }
-
-  @Override
-  public void post(int port, String host, String requestURI, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, port, host, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(int port, String host, String requestURI, Buffer body) {
-    return send(HttpMethod.POST, port, host, requestURI, body);
-  }
-
-  @Override
-  public void post(int port, String host, String requestURI, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, port, host, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(int port, String host, String requestURI, ReadStream<Buffer> body) {
-    return send(HttpMethod.POST, port, host, requestURI, body);
-  }
-
-  @Override
-  public void post(String host, String requestURI, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, host, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(String host, String requestURI, Buffer body) {
-    return send(HttpMethod.POST, host, requestURI, body);
-  }
-
-  @Override
-  public void post(String host, String requestURI, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, host, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(String host, String requestURI, ReadStream<Buffer> body) {
-    return send(HttpMethod.POST, host, requestURI, body);
-  }
-
-  @Override
-  public void post(String requestURI, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(String requestURI, Buffer body) {
-    return send(HttpMethod.POST, requestURI, body);
-  }
-
-  @Override
-  public void post(String requestURI, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.POST, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> post(String requestURI, ReadStream<Buffer> body) {
-    return send(HttpMethod.POST, requestURI, body);
-  }
-
-  @Override
-  public void put(int port, String host, String requestURI, MultiMap headers, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, port, host, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(int port, String host, String requestURI, MultiMap headers, Buffer body) {
-    return send(HttpMethod.PUT, port, host, requestURI, headers, body);
-  }
-
-  @Override
-  public void put(int port, String host, String requestURI, MultiMap headers, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, port, host, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(int port, String host, String requestURI, MultiMap headers, ReadStream<Buffer> body) {
-    return send(HttpMethod.PUT, port, host, requestURI, headers, body);
-  }
-
-  @Override
-  public void put(String host, String requestURI, MultiMap headers, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, host, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(String host, String requestURI, MultiMap headers, Buffer body) {
-    return send(HttpMethod.PUT, host, requestURI, headers, body);
-  }
-
-  @Override
-  public void put(String host, String requestURI, MultiMap headers, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, host, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(String host, String requestURI, MultiMap headers, ReadStream<Buffer> body) {
-    return send(HttpMethod.PUT, host, requestURI, headers, body);
-  }
-
-  @Override
-  public void put(String requestURI, MultiMap headers, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(String requestURI, MultiMap headers, Buffer body) {
-    return send(HttpMethod.PUT, requestURI, headers, body);
-  }
-
-  @Override
-  public void put(String requestURI, MultiMap headers, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, requestURI, headers, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(String requestURI, MultiMap headers, ReadStream<Buffer> body) {
-    return send(HttpMethod.PUT, requestURI, headers, body);
-  }
-
-  @Override
-  public void put(RequestOptions options, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options.setMethod(HttpMethod.PUT), body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(RequestOptions options, Buffer body) {
-    return send(options.setMethod(HttpMethod.PUT), body);
-  }
-
-  @Override
-  public void put(RequestOptions options, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options.setMethod(HttpMethod.PUT), body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(RequestOptions options, ReadStream<Buffer> body) {
-    return send(options.setMethod(HttpMethod.PUT), body);
-  }
-
-  @Override
-  public void put(int port, String host, String requestURI, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, port, host, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(int port, String host, String requestURI, Buffer body) {
-    return send(HttpMethod.PUT, port, host, requestURI, body);
-  }
-
-  @Override
-  public void put(int port, String host, String requestURI, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, port, host, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(int port, String host, String requestURI, ReadStream<Buffer> body) {
-    return send(HttpMethod.PUT, port, host, requestURI, body);
-  }
-
-  @Override
-  public void put(String host, String requestURI, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, host, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(String host, String requestURI, Buffer body) {
-    return send(HttpMethod.PUT, host, requestURI, body);
-  }
-
-  @Override
-  public void put(String host, String requestURI, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, host, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(String host, String requestURI, ReadStream<Buffer> body) {
-    return send(HttpMethod.PUT, host, requestURI, body);
-  }
-
-  @Override
-  public void put(String requestURI, Buffer body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(String requestURI, Buffer body) {
-    return send(HttpMethod.PUT, requestURI, body);
-  }
-
-  @Override
-  public void put(String requestURI, ReadStream<Buffer> body, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.PUT, requestURI, body, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> put(String requestURI, ReadStream<Buffer> body) {
-    return send(HttpMethod.PUT, requestURI, body);
-  }
-
-  @Override
-  public void head(int port, String host, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.HEAD, port, host, requestURI, headers, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> head(int port, String host, String requestURI, MultiMap headers) {
-    return send(HttpMethod.HEAD, port, host, requestURI, headers);
-  }
-
-  @Override
-  public void head(String host, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.HEAD, host, requestURI, headers, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> head(String host, String requestURI, MultiMap headers) {
-    return send(HttpMethod.HEAD, host, requestURI, headers);
-  }
-
-  @Override
-  public void head(String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.HEAD, requestURI, headers, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> head(String requestURI, MultiMap headers) {
-    return send(HttpMethod.HEAD, requestURI, headers);
-  }
-
-  @Override
-  public void head(RequestOptions options, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options.setMethod(HttpMethod.HEAD), responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> head(RequestOptions options) {
-    return send(options.setMethod(HttpMethod.HEAD));
-  }
-
-  @Override
-  public void head(int port, String host, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.HEAD, port, host, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> head(int port, String host, String requestURI) {
-    return send(HttpMethod.HEAD, port, host, requestURI);
-  }
-
-  @Override
-  public void head(String host, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.HEAD, host, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> head(String host, String requestURI) {
-    return send(HttpMethod.HEAD, host, requestURI);
-  }
-
-  @Override
-  public void head(String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.HEAD, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> head(String requestURI) {
-    return send(HttpMethod.HEAD, requestURI);
-  }
-
-  @Override
-  public void options(int port, String host, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.OPTIONS, port, host, requestURI, headers, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> options(int port, String host, String requestURI, MultiMap headers) {
-    return send(HttpMethod.OPTIONS, port, host, requestURI, headers);
-  }
-
-  @Override
-  public void options(String host, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.OPTIONS, host, requestURI, headers, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> options(String host, String requestURI, MultiMap headers) {
-    return send(HttpMethod.OPTIONS, host, requestURI, headers);
-  }
-
-  @Override
-  public void options(String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.OPTIONS, requestURI, headers, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> options(String requestURI, MultiMap headers) {
-    return send(HttpMethod.OPTIONS, requestURI, headers);
-  }
-
-  @Override
-  public void options(RequestOptions options, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options.setMethod(HttpMethod.OPTIONS), responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> options(RequestOptions options) {
-    return send(options.setMethod(HttpMethod.OPTIONS));
-  }
-
-  @Override
-  public void options(int port, String host, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.OPTIONS, port, host, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> options(int port, String host, String requestURI) {
-    return send(HttpMethod.OPTIONS, port, host, requestURI);
-  }
-
-  @Override
-  public void options(String host, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.OPTIONS, host, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> options(String host, String requestURI) {
-    return send(HttpMethod.OPTIONS, host, requestURI);
-  }
-
-  @Override
-  public void options(String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.OPTIONS, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> options(String requestURI) {
-    return send(HttpMethod.OPTIONS, requestURI);
-  }
-
-  @Override
-  public void delete(int port, String host, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.DELETE, port, host, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> delete(int port, String host, String requestURI, MultiMap headers) {
-    return send(HttpMethod.DELETE, port, host, requestURI);
-  }
-
-  @Override
-  public void delete(String host, String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.DELETE, host, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> delete(String host, String requestURI, MultiMap headers) {
-    return send(HttpMethod.DELETE, host, requestURI);
-  }
-
-  @Override
-  public void delete(String requestURI, MultiMap headers, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.DELETE, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> delete(String requestURI, MultiMap headers) {
-    return send(HttpMethod.DELETE, requestURI);
-  }
-
-  @Override
-  public void delete(RequestOptions options, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(options.setMethod(HttpMethod.DELETE), responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> delete(RequestOptions options) {
-    return send(options.setMethod(HttpMethod.DELETE));
-  }
-
-  @Override
-  public void delete(int port, String host, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.DELETE, port, host, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> delete(int port, String host, String requestURI) {
-    return send(HttpMethod.DELETE, port, host, requestURI);
-  }
-
-  @Override
-  public void delete(String host, String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.DELETE, host, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> delete(String host, String requestURI) {
-    return send(HttpMethod.DELETE, host, requestURI);
-  }
-
-  @Override
-  public void delete(String requestURI, Handler<AsyncResult<HttpClientResponse>> responseHandler) {
-    send(HttpMethod.DELETE, requestURI, responseHandler);
-  }
-
-  @Override
-  public Future<HttpClientResponse> delete(String requestURI) {
-    return send(HttpMethod.DELETE, requestURI);
+  public Future<HttpClientRequest> request(HttpMethod method, String requestURI) {
+    return request(method, options.getDefaultPort(), options.getDefaultHost(), requestURI);
   }
 
   @Override
@@ -1213,31 +464,20 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
     }
     webSocketCM.close();
     httpCM.close();
-    ChannelGroupFuture fut = channelGroup.close();
     if (metrics != null) {
-      PromiseInternal<Void> p = (PromiseInternal) Promise.promise();
-      fut.addListener(p);
-      p.future().<Void>compose(v -> {
-        metrics.close();
-        return Future.succeededFuture();
-      }).onComplete(completion);
-    } else {
-      fut.addListener((PromiseInternal)completion);
+      metrics.close();
     }
+    completion.complete();
   }
 
   @Override
   public void close(Handler<AsyncResult<Void>> handler) {
-    ContextInternal closingCtx = vertx.getOrCreateContext();
-    closeFuture.close(handler != null ? closingCtx.promise(handler) : null);
+    netClient.close(handler);
   }
 
   @Override
   public Future<Void> close() {
-    ContextInternal closingCtx = vertx.getOrCreateContext();
-    PromiseInternal<Void> promise = closingCtx.promise();
-    closeFuture.close(promise);
-    return promise.future();
+    return netClient.close();
   }
 
   @Override
@@ -1261,7 +501,7 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
   }
 
   @Override
-  public HttpClient redirectHandler(Function<HttpClientResponse, Future<HttpClientRequest>> handler) {
+  public HttpClient redirectHandler(Function<HttpClientResponse, Future<RequestOptions>> handler) {
     if (handler == null) {
       handler = DEFAULT_HANDLER;
     }
@@ -1270,29 +510,17 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
   }
 
   @Override
-  public Function<HttpClientResponse, Future<HttpClientRequest>> redirectHandler() {
+  public Function<HttpClientResponse, Future<RequestOptions>> redirectHandler() {
     return redirectHandler;
+  }
+
+  public HttpClient proxyFilter(Predicate<SocketAddress> filter) {
+    proxyFilter = filter;
+    return this;
   }
 
   public HttpClientOptions getOptions() {
     return options;
-  }
-
-  void getConnectionForRequest(ContextInternal ctx,
-                               SocketAddress peerAddress,
-                               HttpClientRequestImpl req,
-                               Promise<NetSocket> netSocketPromise,
-                               boolean ssl,
-                               SocketAddress server,
-                               Handler<AsyncResult<HttpClientStream>> handler) {
-    EndpointKey key = new EndpointKey(ssl, server, peerAddress);
-    httpCM.getConnection(ctx, key, ar -> {
-      if (ar.succeeded()) {
-        ar.result().createStream(ctx, req, netSocketPromise, handler);
-      } else {
-        ctx.emit(Future.failedFuture(ar.cause()), handler);
-      }
-    });
   }
 
   /**
@@ -1302,54 +530,113 @@ public class HttpClientImpl implements HttpClient, MetricsProvider, Closeable {
     return vertx;
   }
 
-  SSLHelper getSslHelper() {
-    return sslHelper;
-  }
-
-  private HttpClientRequestBase createRequest(HttpMethod method, SocketAddress server, String host, int port, Boolean ssl, String requestURI, MultiMap headers) {
-    return createRequest(method, server, host, port, ssl, requestURI, headers, vertx.promise());
-  }
-
-  private HttpClientRequestBase createRequest(HttpMethod method, SocketAddress server, String host, int port, Boolean ssl, String requestURI, MultiMap headers, PromiseInternal<HttpClientResponse> responsePromise) {
+  private void doRequest(RequestOptions request, PromiseInternal<HttpClientRequest> promise) {
+    String host = getHost(request);
+    int port = getPort(request);
+    SocketAddress server = request.getServer();
+    if (server == null) {
+      server = SocketAddress.inetSocketAddress(port, host);
+    }
+    ProxyOptions proxyOptions = getProxyOptions(request.getProxyOptions());
+    HttpMethod method = request.getMethod();
+    String requestURI = request.getURI();
+    Boolean ssl = request.isSsl();
+    MultiMap headers = request.getHeaders();
+    long timeout = request.getTimeout();
+    Boolean followRedirects = request.getFollowRedirects();
     Objects.requireNonNull(method, "no null method accepted");
     Objects.requireNonNull(host, "no null host accepted");
     Objects.requireNonNull(requestURI, "no null requestURI accepted");
-    boolean useAlpn = options.isUseAlpn();
-    boolean useSSL = ssl != null ? ssl : options.isSsl();
-    if (!useAlpn && useSSL && options.getProtocolVersion() == HttpVersion.HTTP_2) {
+    boolean useAlpn = this.options.isUseAlpn();
+    boolean useSSL = ssl != null ? ssl : this.options.isSsl();
+    if (!useAlpn && useSSL && this.options.getProtocolVersion() == HttpVersion.HTTP_2) {
       throw new IllegalArgumentException("Must enable ALPN when using H2");
     }
     checkClosed();
-    HttpClientRequestBase req;
-    boolean useProxy = !useSSL && proxyType == ProxyType.HTTP;
-
-    if (useProxy) {
-      // If the requestURI is as not absolute URI then we do not recompute one for the proxy
-      if (!ABS_URI_START_PATTERN.matcher(requestURI).find()) {
-        int defaultPort = 80;
-        String addPort = (port != -1 && port != defaultPort) ? (":" + port) : "";
-        requestURI = (ssl == Boolean.TRUE ? "https://" : "http://") + host + addPort + requestURI;
+    if (proxyFilter != null) {
+      if (!proxyFilter.test(server)) {
+        proxyOptions = null;
       }
-      ProxyOptions proxyOptions = options.getProxyOptions();
-      if (proxyOptions.getUsername() != null && proxyOptions.getPassword() != null) {
-        if (headers == null) {
-          headers = HttpHeaders.headers();
+    }
+    if (proxyOptions != null) {
+      if (!useSSL && proxyOptions.getType() == ProxyType.HTTP) {
+        // If the requestURI is as not absolute URI then we do not recompute one for the proxy
+        if (!ABS_URI_START_PATTERN.matcher(requestURI).find()) {
+          int defaultPort = 80;
+          String addPort = (port != -1 && port != defaultPort) ? (":" + port) : "";
+          requestURI = (ssl == Boolean.TRUE ? "https://" : "http://") + host + addPort + requestURI;
         }
-        headers.add("Proxy-Authorization", "Basic " + Base64.getEncoder()
+        if (proxyOptions.getUsername() != null && proxyOptions.getPassword() != null) {
+          if (headers == null) {
+            headers = HttpHeaders.headers();
+          }
+          headers.add("Proxy-Authorization", "Basic " + Base64.getEncoder()
             .encodeToString((proxyOptions.getUsername() + ":" + proxyOptions.getPassword()).getBytes()));
+        }
+        server = SocketAddress.inetSocketAddress(proxyOptions.getPort(), proxyOptions.getHost());
+        proxyOptions = null;
       }
-      req = new HttpClientRequestImpl(this, responsePromise, useSSL, method, SocketAddress.inetSocketAddress(proxyOptions.getPort(), proxyOptions.getHost()),
-          host, port, requestURI);
+    }
+
+    String peerHost = host;
+    if (peerHost.endsWith(".")) {
+      peerHost = peerHost.substring(0, peerHost.length() -  1);
+    }
+    SocketAddress peerAddress = SocketAddress.inetSocketAddress(port, peerHost);
+    doRequest(method, peerAddress, server, host, port, useSSL, requestURI, headers, timeout, followRedirects, proxyOptions, promise);
+  }
+
+  private void doRequest(
+    HttpMethod method,
+    SocketAddress peerAddress,
+    SocketAddress server,
+    String host,
+    int port,
+    Boolean useSSL,
+    String requestURI,
+    MultiMap headers,
+    long timeout,
+    Boolean followRedirects,
+    ProxyOptions proxyOptions,
+    PromiseInternal<HttpClientRequest> requestPromise) {
+    ContextInternal ctx = requestPromise.context();
+    EndpointKey key = new EndpointKey(useSSL, proxyOptions, server, peerAddress);
+    EventLoopContext eventLoopContext;
+    if (ctx instanceof EventLoopContext) {
+      eventLoopContext = (EventLoopContext) ctx;
     } else {
-      if (server == null) {
-        server = SocketAddress.inetSocketAddress(port, host);
+      eventLoopContext = vertx.createEventLoopContext(ctx.nettyEventLoop(), ctx.workerPool(), ctx.classLoader());
+    }
+    httpCM.getConnection(eventLoopContext, key, timeout, ar1 -> {
+      if (ar1.succeeded()) {
+        Lease<HttpClientConnection> lease = ar1.result();
+        HttpClientConnection conn = lease.get();
+        conn.createStream(ctx, ar2 -> {
+          if (ar2.succeeded()) {
+            HttpClientStream stream = ar2.result();
+            stream.closeHandler(v -> {
+              lease.recycle();
+            });
+            HttpClientRequestImpl req = new HttpClientRequestImpl(this, stream, ctx.promise(), useSSL, method, server, host, port, requestURI);
+            if (headers != null) {
+              req.headers().setAll(headers);
+            }
+            if (followRedirects != null) {
+              req.setFollowRedirects(followRedirects);
+            }
+            if (timeout > 0L) {
+              // Maybe later ?
+              req.setTimeout(timeout);
+            }
+            requestPromise.tryComplete(req);
+          } else {
+            requestPromise.tryFail(ar2.cause());
+          }
+        });
+      } else {
+        requestPromise.tryFail(ar1.cause());
       }
-      req = new HttpClientRequestImpl(this, responsePromise, useSSL, method, server, host, port, requestURI);
-    }
-    if (headers != null) {
-      req.headers().setAll(headers);
-    }
-    return req;
+    });
   }
 
   private void checkClosed() {

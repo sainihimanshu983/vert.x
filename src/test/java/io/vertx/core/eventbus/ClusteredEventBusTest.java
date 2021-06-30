@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2019 Contributors to the Eclipse Foundation
+ * Copyright (c) 2011-2021 Contributors to the Eclipse Foundation
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License 2.0 which is available at
@@ -15,17 +15,26 @@ import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.impl.VertxInternal;
+import io.vertx.core.spi.cluster.NodeSelector;
+import io.vertx.core.spi.cluster.RegistrationUpdateEvent;
+import io.vertx.core.spi.cluster.WrappedClusterManager;
+import io.vertx.core.spi.cluster.WrappedNodeSelector;
 import io.vertx.test.core.TestUtils;
 import io.vertx.test.tls.Cert;
 import org.junit.Test;
 
 import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 
 /**
@@ -294,14 +303,14 @@ public class ClusteredEventBusTest extends ClusteredEventBusTestBase {
   @Test
   public void sendNoContext() throws Exception {
     int size = 1000;
-    ConcurrentLinkedDeque<Integer> expected = new ConcurrentLinkedDeque<>();
+    List<Integer> expected = Stream.iterate(0, i -> i + 1).limit(size).collect(Collectors.toList());
     ConcurrentLinkedDeque<Integer> obtained = new ConcurrentLinkedDeque<>();
     startNodes(2);
     CountDownLatch latch = new CountDownLatch(1);
     vertices[1].eventBus().<Integer>consumer(ADDRESS1, msg -> {
       obtained.add(msg.body());
       if (obtained.size() == expected.size()) {
-        assertEquals(new ArrayList<>(expected), new ArrayList<>(obtained));
+        assertEquals(expected, new ArrayList<>(obtained));
         testComplete();
       }
     }).completionHandler(ar -> {
@@ -310,10 +319,7 @@ public class ClusteredEventBusTest extends ClusteredEventBusTestBase {
     });
     latch.await();
     EventBus bus = vertices[0].eventBus();
-    for (int i = 0;i < size;i++) {
-      expected.add(i);
-      bus.send(ADDRESS1, i);
-    }
+    expected.forEach(val -> bus.send(ADDRESS1, val));
     await();
   }
 
@@ -384,16 +390,36 @@ public class ClusteredEventBusTest extends ClusteredEventBusTestBase {
   }
 
   @Test
-  public void testSendWriteHandler() {
-    startNodes(2);
+  public void testSendWriteHandler() throws Exception {
+    CountDownLatch updateLatch = new CountDownLatch(3);
+    Supplier<VertxOptions> options = () -> getOptions().setClusterManager(new WrappedClusterManager(getClusterManager()) {
+      @Override
+      public void init(Vertx vertx, NodeSelector nodeSelector) {
+        super.init(vertx, new WrappedNodeSelector(nodeSelector) {
+          @Override
+          public void registrationsUpdated(RegistrationUpdateEvent event) {
+            super.registrationsUpdated(event);
+            if (event.address().equals(ADDRESS1) && event.registrations().size() == 1) {
+              updateLatch.countDown();
+            }
+          }
+
+          @Override
+          public boolean wantsUpdatesFor(String address) {
+            return true;
+          }
+        });
+      }
+    });
+    startNodes(options.get(), options.get());
     waitFor(2);
     vertices[1]
       .eventBus()
       .consumer(ADDRESS1, msg -> complete())
-      .completionHandler(onSuccess(v1 -> {
-        MessageProducer<String> producer = vertices[0].eventBus().sender(ADDRESS1);
-        producer.write("body", onSuccess(v2 -> complete()));
-      }));
+      .completionHandler(onSuccess(v1 -> updateLatch.countDown()));
+    awaitLatch(updateLatch);
+    MessageProducer<String> producer = vertices[0].eventBus().sender(ADDRESS1);
+    producer.write("body", onSuccess(v2 -> complete()));
     await();
   }
 
@@ -455,5 +481,39 @@ public class ClusteredEventBusTest extends ClusteredEventBusTestBase {
         }));
       }));
     await();
+  }
+
+  @Test
+  public void testSelectorWantsUpdates() throws Exception {
+    AtomicReference<NodeSelector> nodeSelectorRef = new AtomicReference<>();
+    VertxOptions options = getOptions().setClusterManager(new WrappedClusterManager(getClusterManager()) {
+      @Override
+      public void init(Vertx vertx, NodeSelector nodeSelector) {
+        nodeSelectorRef.set(nodeSelector);
+        super.init(vertx, nodeSelector);
+      }
+    });
+    startNodes(options);
+    assertNotNull(nodeSelectorRef.get());
+    vertices[0].eventBus().consumer(ADDRESS1, msg -> {
+      assertTrue(nodeSelectorRef.get().wantsUpdatesFor(ADDRESS1));
+      testComplete();
+    }).completionHandler(onSuccess(v -> vertices[0].eventBus().send(ADDRESS1, "foo")));
+    await();
+  }
+
+  @Test
+  public void testSelectorDoesNotWantUpdates() throws Exception {
+    AtomicReference<NodeSelector> nodeSelectorRef = new AtomicReference<>();
+    VertxOptions options = getOptions().setClusterManager(new WrappedClusterManager(getClusterManager()) {
+      @Override
+      public void init(Vertx vertx, NodeSelector nodeSelector) {
+        nodeSelectorRef.set(nodeSelector);
+        super.init(vertx, nodeSelector);
+      }
+    });
+    startNodes(options);
+    assertNotNull(nodeSelectorRef.get());
+    assertFalse(nodeSelectorRef.get().wantsUpdatesFor(ADDRESS1));
   }
 }

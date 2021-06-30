@@ -45,6 +45,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.vertx.core.json.impl.JsonUtil.BASE64_ENCODER;
+import static io.vertx.core.json.impl.JsonUtil.BASE64_DECODER;
 import static java.time.format.DateTimeFormatter.ISO_INSTANT;
 
 /**
@@ -283,8 +284,8 @@ public class JacksonCodec implements JsonCodec {
           encodeJson(item, generator);
         }
         generator.writeEndArray();
-      } else if (json instanceof CharSequence) {
-        generator.writeString(((CharSequence) json).toString());
+      } else if (json instanceof String) {
+        generator.writeString((String) json);
       } else if (json instanceof Number) {
         if (json instanceof Short) {
           generator.writeNumber((Short) json);
@@ -358,7 +359,16 @@ public class JacksonCodec implements JsonCodec {
       }
       return clazz.cast(o);
     } else if (o instanceof String) {
-      if (!clazz.isAssignableFrom(String.class)) {
+      String str = (String) o;
+      if (clazz.isEnum()) {
+        o = Enum.valueOf((Class<Enum>) clazz, str);
+      } else if (clazz == byte[].class) {
+        o = BASE64_DECODER.decode(str);
+      } else if (clazz == Buffer.class) {
+        o = Buffer.buffer(BASE64_DECODER.decode(str));
+      } else if (clazz == Instant.class) {
+        o = Instant.from(ISO_INSTANT.parse(str));
+      } else if (!clazz.isAssignableFrom(String.class)) {
         throw new DecodeException("Failed to decode");
       }
       return clazz.cast(o);

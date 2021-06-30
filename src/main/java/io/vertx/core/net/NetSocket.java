@@ -22,6 +22,8 @@ import io.vertx.core.streams.WriteStream;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
 import javax.security.cert.X509Certificate;
+import java.security.cert.Certificate;
+import java.util.List;
 
 /**
  * Represents a socket-like interface to a TCP connection on either the
@@ -32,7 +34,7 @@ import javax.security.cert.X509Certificate;
  * when a server accepts a connection.
  * <p>
  * It implements both {@link ReadStream} and {@link WriteStream} so it can be used with
- * {@link io.vertx.core.streams.Pump} to pump data with flow control.
+ * {@link io.vertx.core.streams.Pipe} to pipe data with flow control.
  *
  * @author <a href="http://tfox.org">Tim Fox</a>
  */
@@ -280,18 +282,26 @@ public interface NetSocket extends ReadStream<Buffer>, WriteStream<Buffer> {
   SSLSession sslSession();
 
   /**
-   * Note: Java SE 5+ recommends to use javax.net.ssl.SSLSession#getPeerCertificates() instead of
-   * of javax.net.ssl.SSLSession#getPeerCertificateChain() which this method is based on. Use {@link #sslSession()} to
-   * access that method.
-   *
    * @return an ordered array of the peer certificates. Returns null if connection is
    *         not SSL.
    * @throws javax.net.ssl.SSLPeerUnverifiedException SSL peer's identity has not been verified.
    * @see javax.net.ssl.SSLSession#getPeerCertificateChain()
    * @see #sslSession()
+   * @deprecated instead use {@link #peerCertificates()} or {@link #sslSession()}
    */
+  @Deprecated
   @GenIgnore
   X509Certificate[] peerCertificateChain() throws SSLPeerUnverifiedException;
+
+  /**
+   * @return an ordered list of the peer certificates. Returns null if connection is
+   *         not SSL.
+   * @throws javax.net.ssl.SSLPeerUnverifiedException SSL peer's identity has not been verified.
+   * @see javax.net.ssl.SSLSession#getPeerCertificateChain()
+   * @see #sslSession()
+   */
+  @GenIgnore()
+  List<Certificate> peerCertificates() throws SSLPeerUnverifiedException;
 
   /**
    * Returns the SNI server name presented during the SSL handshake by the client.
@@ -299,5 +309,11 @@ public interface NetSocket extends ReadStream<Buffer>, WriteStream<Buffer> {
    * @return the indicated server name
    */
   String indicatedServerName();
+
+  /**
+   * @return the application-level protocol negotiated during the TLS handshake
+   */
+  String applicationLayerProtocol();
+
 }
 

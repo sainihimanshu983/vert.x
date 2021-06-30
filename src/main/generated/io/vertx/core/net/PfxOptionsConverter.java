@@ -2,6 +2,7 @@ package io.vertx.core.net;
 
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
+import io.vertx.core.json.impl.JsonUtil;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 
@@ -15,6 +16,11 @@ public class PfxOptionsConverter {
    static void fromJson(Iterable<java.util.Map.Entry<String, Object>> json, PfxOptions obj) {
     for (java.util.Map.Entry<String, Object> member : json) {
       switch (member.getKey()) {
+        case "alias":
+          if (member.getValue() instanceof String) {
+            obj.setAlias((String)member.getValue());
+          }
+          break;
         case "password":
           if (member.getValue() instanceof String) {
             obj.setPassword((String)member.getValue());
@@ -27,7 +33,7 @@ public class PfxOptionsConverter {
           break;
         case "value":
           if (member.getValue() instanceof String) {
-            obj.setValue(io.vertx.core.buffer.Buffer.buffer(java.util.Base64.getDecoder().decode((String)member.getValue())));
+            obj.setValue(io.vertx.core.buffer.Buffer.buffer(JsonUtil.BASE64_DECODER.decode((String)member.getValue())));
           }
           break;
       }
@@ -39,6 +45,9 @@ public class PfxOptionsConverter {
   }
 
    static void toJson(PfxOptions obj, java.util.Map<String, Object> json) {
+    if (obj.getAlias() != null) {
+      json.put("alias", obj.getAlias());
+    }
     if (obj.getPassword() != null) {
       json.put("password", obj.getPassword());
     }
@@ -46,7 +55,7 @@ public class PfxOptionsConverter {
       json.put("path", obj.getPath());
     }
     if (obj.getValue() != null) {
-      json.put("value", java.util.Base64.getEncoder().encodeToString(obj.getValue().getBytes()));
+      json.put("value", JsonUtil.BASE64_ENCODER.encodeToString(obj.getValue().getBytes()));
     }
   }
 }

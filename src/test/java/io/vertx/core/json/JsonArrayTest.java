@@ -18,8 +18,11 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static io.vertx.core.json.impl.JsonUtil.BASE64_DECODER;
@@ -796,49 +799,55 @@ public class JsonArrayTest {
   }
 
   @Test
-  public void testInvalidValsOnCopy() {
-    List<Object> invalid = new ArrayList<>();
-    invalid.add(new SomeClass());
-    JsonArray arr = new JsonArray(invalid);
+  public void testInvalidValsOnCopy1() {
+    SomeClass invalid = new SomeClass();
+    JsonArray array = new JsonArray(Collections.singletonList(invalid));
     try {
-      arr.copy();
+      array.copy();
       fail();
     } catch (IllegalStateException e) {
       // OK
     }
+    array = array.copy(SomeClass.CLONER);
+    assertTrue(array.getValue(0) instanceof SomeClass);
+    assertNotSame(array.getValue(0), invalid);
   }
 
   @Test
   public void testInvalidValsOnCopy2() {
-    List<Object> invalid = new ArrayList<>();
-    List<Object> invalid2 = new ArrayList<>();
-    invalid2.add(new SomeClass());
-    invalid.add(invalid2);
-    JsonArray arr = new JsonArray(invalid);
+    SomeClass invalid = new SomeClass();
+    JsonArray array = new JsonArray(Collections.singletonList(Collections.singletonMap("foo", invalid)));
     try {
-      arr.copy();
+      array.copy();
       fail();
     } catch (IllegalStateException e) {
       // OK
     }
+    array = array.copy(SomeClass.CLONER);
+    assertTrue(array.getJsonObject(0).getValue("foo") instanceof SomeClass);
+    assertNotSame(array.getJsonObject(0).getValue("foo"), invalid);
   }
 
   @Test
   public void testInvalidValsOnCopy3() {
-    List<Object> invalid = new ArrayList<>();
-    Map<String, Object> invalid2 = new HashMap<>();
-    invalid2.put("foo", new SomeClass());
-    invalid.add(invalid2);
-    JsonArray arr = new JsonArray(invalid);
+    SomeClass invalid = new SomeClass();
+    JsonArray array = new JsonArray(Collections.singletonList(Collections.singletonList(invalid)));
     try {
-      arr.copy();
+      array.copy();
       fail();
     } catch (IllegalStateException e) {
       // OK
     }
+    array = array.copy(SomeClass.CLONER);
+    assertTrue(array.getJsonArray(0).getValue(0) instanceof SomeClass);
+    assertNotSame(array.getJsonArray(0).getValue(0), invalid);
   }
 
-  class SomeClass {
+  static class SomeClass {
+    static final Function<Object, ?> CLONER = o -> {
+      assertTrue(o instanceof SomeClass);
+      return new SomeClass();
+    };
   }
 
   @Test
@@ -1319,4 +1328,83 @@ public class JsonArrayTest {
     JsonArray json2 = json.copy();
   }
 
+  @Test
+  public void testNumber() {
+
+    // storing any kind of number should be allowed
+    JsonArray numbers = new JsonArray()
+      .add(new BigDecimal("124567890.0987654321"))
+      .add(new BigInteger("1234567890123456789012345678901234567890"))
+      .add((byte) 0x0a)
+      .add(Math.PI)
+      .add((float) Math.PI)
+      .add(42)
+      .add(1234567890123456789L)
+      .add(Short.MAX_VALUE);
+
+    // copy should have no side effects
+    JsonArray json2 = numbers.copy();
+    // same for encode
+    assertEquals("[124567890.0987654321,1234567890123456789012345678901234567890,10,3.141592653589793,3.1415927,42,1234567890123456789,32767]", numbers.encode());
+
+    // fetching any property should always be a number
+    // the test asserts on not null because not being a number would cause a class cast exception
+    // and the compiler would here just warn that the condition is alwasy true
+    assertNotNull(numbers.getNumber(0));
+    assertNotNull(numbers.getNumber(1));
+    assertNotNull(numbers.getNumber(2));
+    assertNotNull(numbers.getNumber(3));
+    assertNotNull(numbers.getNumber(4));
+    assertNotNull(numbers.getNumber(5));
+    assertNotNull(numbers.getNumber(6));
+    assertNotNull(numbers.getNumber(7));
+
+    // ensure that types are preserved
+    assertTrue(numbers.getNumber(0) instanceof BigDecimal);
+    assertTrue(numbers.getNumber(1) instanceof BigInteger);
+    assertTrue(numbers.getNumber(2) instanceof Byte);
+    assertTrue(numbers.getNumber(3) instanceof Double);
+    assertTrue(numbers.getNumber(4) instanceof Float);
+    assertTrue(numbers.getNumber(5) instanceof Integer);
+    assertTrue(numbers.getNumber(6) instanceof Long);
+    assertTrue(numbers.getNumber(7) instanceof Short);
+
+    // test overflow
+    JsonArray object = new JsonArray().add(42000);
+
+    Number n = object.getNumber(0);
+
+    // 42000 is bigger than Short.MAX_VALUE so it shall overflow (silently)
+    assertEquals(Short.MIN_VALUE + (42000 - Short.MAX_VALUE - 1), n.shortValue());
+    // but not overflow if int
+    assertEquals(42000, n.intValue());
+  }
+
+  @Test
+  public void testStreamRawVSJSON() {
+    JsonArray arr = new JsonArray().add(TimeUnit.DAYS).add(TimeUnit.MINUTES);
+
+    // assert that stream values are converted to String as per JSON rules
+    List <?> jsonData = arr
+      .stream()
+      .peek(t -> assertTrue(t instanceof String))
+      .collect(Collectors.toList());
+
+    for (Object o : jsonData) {
+      assertTrue(o instanceof String);
+    }
+
+    // test raw
+
+    // assert that stream values are converted to String as per JSON rules
+    List<?> rawData = (List<?>) arr
+      .getList()
+      .stream()
+      .peek(t -> assertTrue(t instanceof TimeUnit))
+      .collect(Collectors.toList());
+
+    for (Object o : rawData) {
+      assertTrue(o instanceof TimeUnit);
+    }
+  }
 }

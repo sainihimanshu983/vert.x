@@ -11,15 +11,16 @@
 
 package io.vertx.core.http;
 
+import io.netty.util.internal.PlatformDependent;
 import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
-import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.*;
 import io.vertx.core.net.impl.TrustAllTrustManager;
 import io.vertx.test.core.TestUtils;
 import io.vertx.test.proxy.HAProxy;
 import io.vertx.test.tls.Cert;
 import io.vertx.test.tls.Trust;
+import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -31,6 +32,7 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.security.*;
+import java.security.cert.Certificate;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -81,6 +83,18 @@ public abstract class HttpTLSTest extends HttpTestBase {
   // Server specifies cert that the client trusts (not trust all)
   public void testTLSClientTrustServerCert() throws Exception {
     testTLS(Cert.NONE, Trust.SERVER_JKS, Cert.SERVER_JKS, Trust.NONE).pass();
+  }
+
+  @Test
+  // Server specifies cert that the client trusts (not trust all)
+  public void testTLSClientTrustServerCertKeyStore() throws Exception {
+    testTLS(Cert.NONE, () -> {
+      JksOptions opts = Trust.SERVER_JKS.get();
+      return new KeyStoreOptions().setType("JKS").setPath(opts.getPath()).setPassword(opts.getPassword());
+    }, () -> {
+      JksOptions opts = Cert.SERVER_JKS.get();
+      return new KeyStoreOptions().setType("JKS").setPath(opts.getPath()).setPassword(opts.getPassword());
+    }, Trust.NONE).pass();
   }
 
   @Test
@@ -290,6 +304,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
   @Test
   // Provide an host name with a trailing dot
   public void testTLSTrailingDotHost() throws Exception {
+    Assume.assumeTrue(PlatformDependent.javaVersion() < 9);
     // We just need a vanilla cert for this test
     SelfSignedCertificate cert = SelfSignedCertificate.create("host2.com");
     TLSTest test = testTLS(Cert.NONE, cert::trustOptions, cert::keyCertOptions, Trust.NONE)
@@ -424,7 +439,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
   @Test
   // Client provides SNI and server responds with a matching certificate for the indicated server name
   public void testSNITrustPKCS12() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_PKCS12, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_PKCS12, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("host2.com"))
         .pass()
@@ -435,7 +450,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
   @Test
   // Client provides SNI and server responds with a matching certificate for the indicated server name
   public void testSNITrustPEM() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_PEM, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_PEM, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("host2.com"))
         .pass()
@@ -454,7 +469,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
   @Test
   // Client provides SNI but server ignores it and provides a different cerficate - check we get a certificate
   public void testSNIServerIgnoresExtension2() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SERVER_JKS, Cert.SNI_JKS, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SERVER_JKS, Cert.SNI_JKS, Trust.NONE)
         .clientVerifyHost(false)
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("host2.com"))
         .pass()
@@ -496,7 +511,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
   @Test
   // Client provides SNI matched on the server by a wildcard certificate
   public void testSNIWildcardMatchPKCS12() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST3, Cert.SNI_PKCS12, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST3, Cert.SNI_PKCS12, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("sub.host3.com"))
         .pass()
@@ -507,7 +522,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
   @Test
   // Client provides SNI matched on the server by a wildcard certificate
   public void testSNIWildcardMatchPEM() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST3, Cert.SNI_PEM, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST3, Cert.SNI_PEM, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("sub.host3.com"))
         .pass()
@@ -517,7 +532,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAlternativeNameMatch1() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_JKS, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_JKS, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("host4.com"))
         .pass()
@@ -527,7 +542,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAlternativeNameMatch1PKCS12() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_PKCS12, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_PKCS12, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("host4.com"))
         .pass()
@@ -537,7 +552,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAlternativeNameMatch1PEM() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_PEM, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_PEM, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("host4.com"))
         .pass()
@@ -547,7 +562,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAlternativeNameMatch2() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_JKS, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_JKS, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("www.host4.com"))
         .pass()
@@ -557,7 +572,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAlternativeNameMatch2PKCS12() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_PKCS12, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_PKCS12, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("www.host4.com"))
         .pass()
@@ -567,7 +582,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAlternativeNameMatch2PEM() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_PEM, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST4, Cert.SNI_PEM, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("www.host4.com"))
         .pass()
@@ -577,7 +592,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAlternativeNameWildcardMatch() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_JKS, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_JKS, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("www.host5.com"))
         .pass()
@@ -587,7 +602,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAlternativeNameWildcardMatchPKCS12() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_PKCS12, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_PKCS12, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("www.host5.com"))
         .pass()
@@ -597,7 +612,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAlternativeNameWildcardMatchPEM() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_PEM, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_PEM, Trust.NONE)
         .serverSni()
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("www.host5.com"))
         .pass()
@@ -634,7 +649,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAltenativeNameCNMatch2() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_JKS, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_JKS, Trust.NONE)
         .serverSni()
         .clientVerifyHost(false)
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("host5.com"))
@@ -645,7 +660,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAltenativeNameCNMatch2PKCS12() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_PKCS12, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_PKCS12, Trust.NONE)
         .serverSni()
         .clientVerifyHost(false)
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("host5.com"))
@@ -656,7 +671,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNISubjectAltenativeNameCNMatch2PEM() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_PEM, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST5, Cert.SNI_PEM, Trust.NONE)
         .serverSni()
         .clientVerifyHost(false)
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("host5.com"))
@@ -667,7 +682,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNIWithALPN() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_JKS, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_JKS, Trust.NONE)
         .serverSni()
         .clientUsesAlpn()
         .serverUsesAlpn()
@@ -680,9 +695,15 @@ public abstract class HttpTLSTest extends HttpTestBase {
   @Test
   // Client provides SNI and server responds with a matching certificate for the indicated server name
   public void testSNIWithHostHeader() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_JKS, Trust.NONE)
+
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_JKS, Trust.NONE)
         .serverSni()
-        .requestProvider(client -> client.request(HttpMethod.POST, 4043, "localhost", "/somepath").setAuthority("host2.com:4043"))
+        .requestProvider(client -> client.request(new RequestOptions()
+          .setServer(SocketAddress.inetSocketAddress(4043, "localhost"))
+          .setMethod(HttpMethod.POST)
+          .setPort(4043)
+          .setHost("host2.com")
+          .setURI("/somepath")))
         .pass()
         .clientPeerCert();
     assertEquals("host2.com", TestUtils.cnOf(cert));
@@ -690,7 +711,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testSNIWithOpenSSL() throws Exception {
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_JKS, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_JKS, Trust.NONE)
         .clientOpenSSL()
         .serverOpenSSL()
         .serverSni()
@@ -775,8 +796,8 @@ public abstract class HttpTLSTest extends HttpTestBase {
   public void testSNICustomTrustManagerFactoryMapper() throws Exception {
     testTLS(Cert.CLIENT_PEM, Trust.SNI_JKS_HOST2, Cert.SNI_JKS, () -> new TrustOptions() {
       @Override
-      public JsonObject toJson() {
-        throw new UnsupportedOperationException();
+      public Function<String, TrustManager[]> trustManagerMapper(Vertx vertx) throws Exception {
+        return null;
       }
       @Override
       public TrustManagerFactory getTrustManagerFactory(Vertx v) throws Exception {
@@ -815,10 +836,6 @@ public abstract class HttpTLSTest extends HttpTestBase {
   @Test
   public void testSNICustomTrustManagerFactoryMapper2() throws Exception {
     testTLS(Cert.CLIENT_PEM, Trust.SNI_JKS_HOST2, Cert.SNI_JKS, () -> new TrustOptions() {
-      @Override
-      public JsonObject toJson() {
-        throw new UnsupportedOperationException();
-      }
 
       @Override
       public Function<String, TrustManager[]> trustManagerMapper(Vertx v) throws Exception {
@@ -877,10 +894,9 @@ public abstract class HttpTLSTest extends HttpTestBase {
   public void testCustomTrustManagerFactory() throws Exception {
     testTLS(Cert.NONE, () -> new TrustOptions() {
       @Override
-      public JsonObject toJson() {
-        throw new UnsupportedOperationException();
+      public Function<String, TrustManager[]> trustManagerMapper(Vertx vertx) throws Exception {
+        return null;
       }
-
       @Override
       public TrustManagerFactory getTrustManagerFactory(Vertx v) throws Exception {
         return new TrustManagerFactory(new TrustManagerFactorySpi() {
@@ -934,7 +950,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
     private boolean followRedirects;
     private boolean serverSNI;
     private boolean clientForceSNI;
-    private Function<HttpClient, HttpClientRequest> requestProvider = client -> {
+    private Function<HttpClient, Future<HttpClientRequest>> requestProvider = client -> {
       String httpHost;
       if (connectHostname != null) {
         httpHost = connectHostname;
@@ -948,9 +964,13 @@ public abstract class HttpTLSTest extends HttpTestBase {
       } else {
         httpPort = 4043;
       }
-      return client.request(HttpMethod.POST, httpPort, httpHost, DEFAULT_TEST_URI);
+      return client.request(new RequestOptions()
+        .setMethod(HttpMethod.POST)
+        .setHost(httpHost)
+        .setPort(httpPort)
+        .setURI(DEFAULT_TEST_URI));
     };
-    X509Certificate clientPeerCert;
+    Certificate clientPeerCert;
     String indicatedServerName;
 
     public TLSTest(Cert<?> clientCert, Trust<?> clientTrust, Cert<?> serverCert, Trust<?> serverTrust) {
@@ -1076,7 +1096,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
       return this;
     }
 
-    TLSTest requestProvider(Function<HttpClient, HttpClientRequest> requestProvider) {
+    TLSTest requestProvider(Function<HttpClient, Future<HttpClientRequest>> requestProvider) {
       this.requestProvider = requestProvider;
       return this;
     }
@@ -1096,7 +1116,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
       return this;
     }
 
-    public X509Certificate clientPeerCert() {
+    public Certificate clientPeerCert() {
       return clientPeerCert;
     }
 
@@ -1215,32 +1235,40 @@ public abstract class HttpTLSTest extends HttpTestBase {
         } else {
           httpHost = DEFAULT_HTTP_HOST;
         }
-        HttpClientRequest req = requestProvider.apply(client).onComplete(ar2 -> {
-          if (ar2.succeeded()) {
-            HttpClientResponse response = ar2.result();
-            HttpConnection conn = response.request().connection();
-            if (conn.isSsl()) {
-              try {
-                clientPeerCert = conn.peerCertificateChain()[0];
-              } catch (SSLPeerUnverifiedException ignore) {
-              }
-            }
-            if (shouldPass) {
-              response.version();
-              HttpMethod method = response.request().method();
-              if (method == HttpMethod.GET || method == HttpMethod.HEAD) {
-                complete();
+        requestProvider.apply(client).onComplete(ar_ -> {
+          if (ar_.succeeded()) {
+            HttpClientRequest req = ar_.result();
+            req.setFollowRedirects(followRedirects);
+            req.send("foo", ar2 -> {
+              if (ar2.succeeded()) {
+                HttpClientResponse response = ar2.result();
+                HttpConnection conn = response.request().connection();
+                if (conn.isSsl()) {
+                  try {
+                    clientPeerCert = conn.peerCertificates().get(0);
+                  } catch (SSLPeerUnverifiedException ignore) {
+                  }
+                }
+                if (shouldPass) {
+                  response.version();
+                  HttpMethod method = response.request().getMethod();
+                  if (method == HttpMethod.GET || method == HttpMethod.HEAD) {
+                    complete();
+                  } else {
+                    response.bodyHandler(data -> {
+                      assertEquals("bar", data.toString());
+                      complete();
+                    });
+                  }
+                } else {
+                  HttpTLSTest.this.fail("Should not get a response");
+                }
               } else {
-                response.bodyHandler(data -> {
-                  assertEquals("bar", data.toString());
-                  complete();
-                });
+                System.out.println("HANDLE ME");
               }
-            } else {
-              HttpTLSTest.this.fail("Should not get a response");
-            }
+            });
           } else {
-            Throwable t = ar.cause();
+            Throwable t = ar_.cause();
             if (shouldPass) {
               t.printStackTrace();
               HttpTLSTest.this.fail("Should not throw exception");
@@ -1249,8 +1277,6 @@ public abstract class HttpTLSTest extends HttpTestBase {
             }
           }
         });
-        req.setFollowRedirects(followRedirects);
-        req.end("foo");
       });
       await();
       return this;
@@ -1288,7 +1314,13 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   @Test
   public void testPKCS12MissingPassword() {
-    testInvalidKeyStore(Cert.SERVER_PKCS12.get().setPassword(null), "Get Key failed: null", null);
+    String msg;
+    if (PlatformDependent.javaVersion() < 15) {
+      msg = "Get Key failed: null";
+    } else {
+      msg = "Get Key failed: Cannot read the array length because \"password\" is null";
+    }
+    testInvalidKeyStore(Cert.SERVER_PKCS12.get().setPassword(null), msg, null);
   }
 
   @Test
@@ -1420,7 +1452,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
         ok |= cause.getMessage().startsWith(expectedPossiblePrefix);
       }
       if (!ok) {
-        fail("Was expecting e.getCause().getMessage() to be prefixed by one of " + expectedPossiblePrefixes);
+        fail("Was expecting <" + cause.getMessage() + "> e.getCause().getMessage() to be prefixed by one of " + expectedPossiblePrefixes);
       }
       assertTrue(cause.getMessage().endsWith(expectedSuffix));
     }
@@ -1468,7 +1500,7 @@ public abstract class HttpTLSTest extends HttpTestBase {
 
   private void testProxyWithSNI(ProxyType proxyType) throws Exception {
     startProxy(null, proxyType);
-    X509Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_JKS, Trust.NONE)
+    Certificate cert = testTLS(Cert.NONE, Trust.SNI_JKS_HOST2, Cert.SNI_JKS, Trust.NONE)
         .serverSni()
         .useProxy(proxyType)
         .requestOptions(new RequestOptions().setSsl(true).setPort(4043).setHost("host2.com"))

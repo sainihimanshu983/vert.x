@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2019 Contributors to the Eclipse Foundation
+ * Copyright (c) 2011-2021 Contributors to the Eclipse Foundation
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License 2.0 which is available at
@@ -13,8 +13,10 @@ package io.vertx.test.faketracer;
 
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
+import io.vertx.core.spi.tracing.SpanKind;
 import io.vertx.core.spi.tracing.TagExtractor;
 import io.vertx.core.spi.tracing.VertxTracer;
+import io.vertx.core.tracing.TracingPolicy;
 
 import java.util.Collections;
 import java.util.List;
@@ -38,12 +40,12 @@ public class FakeTracer implements VertxTracer<Span, Span> {
     return idGenerator.getAndIncrement();
   }
 
-  public Span newTrace(String operation) {
-    return new Span(this, nextId(), nextId(), nextId(), operation);
+  private Span newTrace(SpanKind kind, String operation) {
+    return new Span(this, kind, nextId(), nextId(), nextId(), operation);
   }
 
   public Span newTrace() {
-    return new Span(this, nextId(), nextId(), nextId(), null);
+    return new Span(this, null, nextId(), nextId(), nextId(), null);
   }
 
   public Span activeSpan() {
@@ -72,7 +74,7 @@ public class FakeTracer implements VertxTracer<Span, Span> {
     headers.accept("span-id", "" + span.id);
   }
 
-  public Span decode(String operation, Iterable<Map.Entry<String, String>> headers) {
+  private Span decode(SpanKind kind, String operation, Iterable<Map.Entry<String, String>> headers) {
     String traceId = null;
     String spanId = null;
     String spanParentId = null;
@@ -90,24 +92,31 @@ public class FakeTracer implements VertxTracer<Span, Span> {
       }
     }
     if (traceId != null && spanId != null && spanParentId != null) {
-        return new Span(this, Integer.parseInt(traceId), Integer.parseInt(spanParentId),
+        return new Span(this, kind, Integer.parseInt(traceId), Integer.parseInt(spanParentId),
           Integer.parseInt(spanId), operation);
     }
     return null;
   }
 
-  private Span getServerSpan(String operation, Iterable<Map.Entry<String, String>> headers) {
-    Span parent = decode(operation, headers);
+  private Span getServerSpan(SpanKind kind, TracingPolicy policy, String operation, Iterable<Map.Entry<String, String>> headers) {
+    Span parent = decode(kind, operation, headers);
     if (parent != null) {
-      return parent.createChild(operation);
-    } else {
-      return newTrace(operation);
+      return parent.createChild(kind, operation);
+    } else if (policy == TracingPolicy.ALWAYS) {
+      return newTrace(kind, operation);
     }
+    return null;
   }
 
   @Override
-  public <R> Span receiveRequest(Context context, R request, String operation, Iterable<Map.Entry<String, String>> headers, TagExtractor<R> tagExtractor) {
-    Span serverSpan = getServerSpan(operation, headers);
+  public <R> Span receiveRequest(Context context, SpanKind kind, TracingPolicy policy, R request, String operation, Iterable<Map.Entry<String, String>> headers, TagExtractor<R> tagExtractor) {
+    if (policy == TracingPolicy.IGNORE) {
+      return null;
+    }
+    Span serverSpan = getServerSpan(kind, policy, operation, headers);
+    if (serverSpan == null) {
+      return null;
+    }
     serverSpan.addTag("span_kind", "server");
     addTags(serverSpan, request, tagExtractor);
     // Create scope
@@ -123,12 +132,17 @@ public class FakeTracer implements VertxTracer<Span, Span> {
   }
 
   @Override
-  public <R> Span sendRequest(Context context, R request, String operation, BiConsumer<String, String> headers, TagExtractor<R> tagExtractor) {
+  public <R> Span sendRequest(Context context, SpanKind kind, TracingPolicy policy, R request, String operation, BiConsumer<String, String> headers, TagExtractor<R> tagExtractor) {
+    if (policy == TracingPolicy.IGNORE) {
+      return null;
+    }
     Span span = activeSpan(context);
-    if (span == null) {
-      span = newTrace(operation);
+    if (span != null) {
+      span = span.createChild(kind, operation);
+    } else if (policy == TracingPolicy.ALWAYS) {
+      span = newTrace(kind, operation);
     } else {
-      span = span.createChild(operation);
+      return null;
     }
     span.addTag("span_kind", "client");
     addTags(span, request, tagExtractor);

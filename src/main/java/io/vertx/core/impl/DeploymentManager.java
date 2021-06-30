@@ -22,7 +22,6 @@ import io.vertx.core.Verticle;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
-import io.vertx.core.spi.metrics.VertxMetrics;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -63,7 +62,13 @@ public class DeploymentManager {
     }
     options.checkIsolationNotDefined();
     ContextInternal currentContext = vertx.getOrCreateContext();
-    ClassLoader cl = getCurrentClassLoader();
+    ClassLoader cl = options.getClassLoader();
+    if (cl == null) {
+      cl = Thread.currentThread().getContextClassLoader();
+      if (cl == null) {
+        cl = getClass().getClassLoader();
+      }
+    }
     return doDeploy(options, v -> "java:" + v.getClass().getName(), currentContext, currentContext, cl, verticleSupplier)
       .map(Deployment::deploymentID);
   }
@@ -74,7 +79,7 @@ public class DeploymentManager {
     if (deployment == null) {
       return ((ContextInternal) currentContext).failedFuture(new IllegalStateException("Unknown deployment"));
     } else {
-      return deployment.undeploy();
+      return deployment.doUndeploy(vertx.getOrCreateContext());
     }
   }
 
@@ -115,14 +120,6 @@ public class DeploymentManager {
     } else {
       return vertx.getOrCreateContext().succeededFuture();
     }
-  }
-
-  private ClassLoader getCurrentClassLoader() {
-    ClassLoader cl = Thread.currentThread().getContextClassLoader();
-    if (cl == null) {
-      cl = getClass().getClassLoader();
-    }
-    return cl;
   }
 
   private <T> void reportFailure(Throwable t, Context context, Handler<AsyncResult<T>> completionHandler) {
@@ -185,15 +182,11 @@ public class DeploymentManager {
     AtomicInteger deployCount = new AtomicInteger();
     AtomicBoolean failureReported = new AtomicBoolean();
     for (Verticle verticle: verticles) {
-      CloseHooks closeHooks = new CloseHooks(log);
-      WorkerExecutorInternal workerExec = poolName != null ? vertx.createSharedWorkerExecutor(poolName, options.getWorkerPoolSize(), options.getMaxWorkerExecuteTime(), options.getMaxWorkerExecuteTimeUnit()) : null;
-      WorkerPool pool = workerExec != null ? workerExec.getPool() : null;
-      ContextImpl context = (ContextImpl) (options.isWorker() ? vertx.createWorkerContext(deployment, closeHooks, pool, tccl) :
-        vertx.createEventLoopContext(deployment, closeHooks, pool, tccl));
-      if (workerExec != null) {
-        closeHooks.add(workerExec);
-      }
-      VerticleHolder holder = new VerticleHolder(verticle, context, closeHooks);
+      CloseFuture closeFuture = new CloseFuture(log);
+      WorkerPool workerPool = poolName != null ? vertx.createSharedWorkerPool(poolName, options.getWorkerPoolSize(), options.getMaxWorkerExecuteTime(), options.getMaxWorkerExecuteTimeUnit()) : null;
+      ContextImpl context = (options.isWorker() ? vertx.createWorkerContext(deployment, closeFuture, workerPool, tccl) :
+        vertx.createEventLoopContext(deployment, closeFuture, workerPool, tccl));
+      VerticleHolder holder = new VerticleHolder(verticle, context, workerPool, closeFuture);
       deployment.addVerticle(holder);
       context.runOnContext(v -> {
         try {
@@ -208,7 +201,7 @@ public class DeploymentManager {
                   deployment.child = true;
                 } else {
                   // Orphan
-                  deployment.undeploy(event -> promise.fail("Verticle deployment failed.Could not be added as child of parent verticle"));
+                  deployment.doUndeploy(vertx.getOrCreateContext()).onComplete(ar2 -> promise.fail("Verticle deployment failed.Could not be added as child of parent verticle"));
                   return;
                 }
               }
@@ -217,12 +210,12 @@ public class DeploymentManager {
                 promise.complete(deployment);
               }
             } else if (failureReported.compareAndSet(false, true)) {
-              deployment.rollback(callingContext, promise, context, holder.closeHooks, ar.cause());
+              deployment.rollback(callingContext, promise, context, holder, ar.cause());
             }
           });
         } catch (Throwable t) {
           if (failureReported.compareAndSet(false, true))
-            deployment.rollback(callingContext, promise, context, holder.closeHooks, t);
+            deployment.rollback(callingContext, promise, context, holder, t);
         }
       });
     }
@@ -234,12 +227,23 @@ public class DeploymentManager {
 
     final Verticle verticle;
     final ContextImpl context;
-    final CloseHooks closeHooks;
+    final WorkerPool workerPool;
+    final CloseFuture closeFuture;
 
-    VerticleHolder(Verticle verticle, ContextImpl context, CloseHooks closeHooks) {
+    VerticleHolder(Verticle verticle, ContextImpl context, WorkerPool workerPool, CloseFuture closeFuture) {
       this.verticle = verticle;
       this.context = context;
-      this.closeHooks = closeHooks;
+      this.workerPool = workerPool;
+      this.closeFuture = closeFuture;
+    }
+
+    void close(Handler<AsyncResult<Void>> completionHandler) {
+      closeFuture.close().onComplete(ar -> {
+        if (workerPool != null) {
+          workerPool.close();
+        }
+        completionHandler.handle(ar);
+      });
     }
   }
 
@@ -270,7 +274,7 @@ public class DeploymentManager {
       verticles.add(holder);
     }
 
-    private synchronized void rollback(ContextInternal callingContext, Handler<AsyncResult<Deployment>> completionHandler, ContextImpl context, CloseHooks closeHooks, Throwable cause) {
+    private synchronized void rollback(ContextInternal callingContext, Handler<AsyncResult<Deployment>> completionHandler, ContextImpl context, VerticleHolder closeFuture, Throwable cause) {
       if (status == ST_DEPLOYED) {
         status = ST_UNDEPLOYING;
         doUndeployChildren(callingContext).onComplete(childrenResult -> {
@@ -290,16 +294,10 @@ public class DeploymentManager {
           if (childrenResult.failed()) {
             reportFailure(cause, callingContext, completionHandler);
           } else {
-            closeHooks.run(closeHookAsyncResult -> reportFailure(cause, callingContext, completionHandler));
+            closeFuture.close(closeHookAsyncResult -> reportFailure(cause, callingContext, completionHandler));
           }
         });
       }
-    }
-
-    @Override
-    public Future<Void> undeploy() {
-      ContextInternal currentContext = vertx.getOrCreateContext();
-      return doUndeploy(currentContext);
     }
 
     private synchronized Future<Void> doUndeployChildren(ContextInternal undeployingContext) {
@@ -308,7 +306,7 @@ public class DeploymentManager {
         for (Deployment childDeployment: new HashSet<>(children)) {
           Promise<Void> p = Promise.promise();
           childFuts.add(p.future());
-          childDeployment.doUndeploy(undeployingContext, ar -> {
+          childDeployment.doUndeploy(undeployingContext).onComplete(ar -> {
             children.remove(childDeployment);
             p.handle(ar);
           });
@@ -337,11 +335,11 @@ public class DeploymentManager {
           Promise p = Promise.promise();
           undeployFutures.add(p.future());
           context.runOnContext(v -> {
-            Promise<Void> stopPromise = Promise.promise();
+            Promise<Void> stopPromise = undeployingContext.promise();
             Future<Void> stopFuture = stopPromise.future();
             stopFuture.onComplete(ar -> {
               deployments.remove(deploymentID);
-              verticleHolder.closeHooks.run(ar2 -> {
+              verticleHolder.close(ar2 -> {
                 if (ar2.failed()) {
                   // Log error but we report success anyway
                   log.error("Failed to run close hook", ar2.cause());
@@ -368,8 +366,12 @@ public class DeploymentManager {
         Handler<Void> handler = undeployHandler;
         if (handler != null) {
           undeployHandler = null;
-          fut.onComplete(ar -> {
+          return fut.compose(v -> {
             handler.handle(null);
+            return Future.succeededFuture();
+          }, v -> {
+            handler.handle(null);
+            return Future.succeededFuture();
           });
         }
         return fut;

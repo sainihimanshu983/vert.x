@@ -108,6 +108,16 @@ public class MessageConsumerImpl<T> extends HandlerRegistration<T> implements Me
   }
 
   @Override
+  public void registration(Handler<AsyncResult<MessageConsumer<T>>> handler) {
+
+  }
+
+  @Override
+  public Future<MessageConsumer<T>> registration() {
+    return null;
+  }
+
+  @Override
   public synchronized Future<Void> unregister() {
     handler = null;
     if (endHandler != null) {
@@ -120,7 +130,7 @@ public class MessageConsumerImpl<T> extends HandlerRegistration<T> implements Me
       for (Message<T> msg : discarded) {
         discard(msg);
         if (handler != null) {
-          context.dispatch(msg, handler);
+          context.emit(msg, handler);
         }
       }
     }
@@ -174,7 +184,7 @@ public class MessageConsumerImpl<T> extends HandlerRegistration<T> implements Me
     if (handler == null) {
       throw new NullPointerException();
     }
-    context.dispatch(msg, handler);
+    context.emit(msg, handler);
   }
 
   private void deliver(Handler<Message<T>> theHandler, Message<T> message) {

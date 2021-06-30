@@ -43,7 +43,7 @@ Or to specify the host and port in the call to listen, ignoring what is configur
 The default host is `0.0.0.0` which means 'listen on all available addresses' and the default port is `0`, which is a
 special value that instructs the server to find a random unused local port and use that.
 
-The actual bind is asynchronous so the server might not actually be listening until some time *after* the call to
+The actual bind is asynchronous, so the server might not actually be listening until some time *after* the call to
 listen has returned.
 
 If you want to be notified when the server is actually listening you can provide a handler to the `listen` call.
@@ -154,7 +154,7 @@ classpath resolution or disabling it.
 === Streaming sockets
 
 Instances of {@link io.vertx.core.net.NetSocket} are also {@link io.vertx.core.streams.ReadStream} and
-{@link io.vertx.core.streams.WriteStream} instances so they can be used to pipe data to or from other
+{@link io.vertx.core.streams.WriteStream} instances, so they can be used to pipe data to or from other
 read and write streams.
 
 See the chapter on <<streams, streams >> for more information.
@@ -266,7 +266,7 @@ A client can be configured to automatically retry connecting to the server in th
 This is configured with {@link io.vertx.core.net.NetClientOptions#setReconnectInterval(long)} and
 {@link io.vertx.core.net.NetClientOptions#setReconnectAttempts(int)}.
 
-NOTE: Currently Vert.x will not attempt to reconnect if a connection fails, reconnect attempts and interval
+NOTE: Currently, Vert.x will not attempt to reconnect if a connection fails, reconnect attempts and interval
 only apply to creating initial connections.
 
 [source,$lang]
@@ -379,6 +379,14 @@ https://tools.ietf.org/html/rfc7468#section-5[RFC 7468, Section 5].
 WARNING: Keep in mind that the keys contained in an unencrypted PKCS8 or a PKCS1 PEM file can be extracted by
 anybody who can read the file. Thus, make sure to put proper access restrictions on such PEM files in order to
 prevent misuse.
+
+Finally, you can also load generic Java keystore, it is useful for using other KeyStore implementations
+like Bouncy Castle:
+
+[source,$lang]
+----
+{@link examples.NetExamples#exampleBKS}
+----
 
 ==== Specifying trust for the server
 
@@ -613,13 +621,19 @@ Buffer configuration is also supported:
 
 ==== Configuring the Cipher suite
 
-By default, the TLS configuration will use the Cipher suite of the JVM running Vert.x. This Cipher suite can be
-configured with a suite of enabled ciphers:
+By default, the TLS configuration will use the list of Cipher suites of the SSL engine:
+
+- JDK SSL engine when {@link io.vertx.core.net.JdkSSLEngineOptions} is used
+- OpenSSL engine when {@link io.vertx.core.net.OpenSSLEngineOptions} is used
+
+This Cipher suite can be configured with a suite of enabled ciphers:
 
 [source,$lang]
 ----
 {@link examples.NetExamples#example44}
 ----
+
+When the enabled cipher suites is defined (i.e not empty), it takes precedence over the default cipher suites of the SSL engine.
 
 Cipher suite can be specified on the {@link io.vertx.core.net.NetServerOptions} or {@link io.vertx.core.net.NetClientOptions} configuration.
 
@@ -770,6 +784,14 @@ Here's an example:
 
 The DNS resolution is always done on the proxy server, to achieve the functionality of a SOCKS4 client, it is necessary
 to resolve the DNS address locally.
+
+You can use {@link io.vertx.core.net.NetClientOptions#setNonProxyHosts} to configure a list of host bypassing
+the proxy. The lists accepts `*` wildcard for matching domains:
+
+[source,$lang]
+----
+{@link examples.NetExamples#nonProxyHosts}
+----
 
 
 === Using HA PROXY protocol

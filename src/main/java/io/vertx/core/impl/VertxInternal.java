@@ -15,11 +15,11 @@ package io.vertx.core.impl;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.resolver.AddressResolverGroup;
-import io.vertx.codegen.annotations.Nullable;
 import io.vertx.core.*;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.impl.HttpServerImpl;
+import io.vertx.core.impl.future.PromiseInternal;
 import io.vertx.core.net.NetClient;
 import io.vertx.core.net.NetClientOptions;
 import io.vertx.core.net.impl.NetServerImpl;
@@ -28,6 +28,7 @@ import io.vertx.core.net.impl.TCPServerBase;
 import io.vertx.core.net.impl.transport.Transport;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.core.spi.metrics.VertxMetrics;
+import io.vertx.core.spi.tracing.VertxTracer;
 
 import java.io.File;
 import java.net.InetAddress;
@@ -106,18 +107,18 @@ public interface VertxInternal extends Vertx {
   /**
    * @return event loop context
    */
-  ContextInternal createEventLoopContext(Deployment deployment, CloseHooks closeHooks, WorkerPool workerPool, ClassLoader tccl);
+  EventLoopContext createEventLoopContext(Deployment deployment, CloseFuture closeFuture, WorkerPool workerPool, ClassLoader tccl);
 
-  ContextInternal createEventLoopContext(EventLoop eventLoop, WorkerPool workerPool, ClassLoader tccl);
+  EventLoopContext createEventLoopContext(EventLoop eventLoop, WorkerPool workerPool, ClassLoader tccl);
 
-  ContextInternal createEventLoopContext();
+  EventLoopContext createEventLoopContext();
 
   /**
    * @return worker loop context
    */
-  ContextInternal createWorkerContext(Deployment deployment, CloseHooks closeHooks, WorkerPool pool, ClassLoader tccl);
+  WorkerContext createWorkerContext(Deployment deployment, CloseFuture closeFuture, WorkerPool pool, ClassLoader tccl);
 
-  ContextInternal createWorkerContext();
+  WorkerContext createWorkerContext();
 
   @Override
   WorkerExecutorInternal createSharedWorkerExecutor(String name);
@@ -130,6 +131,8 @@ public interface VertxInternal extends Vertx {
 
   @Override
   WorkerExecutorInternal createSharedWorkerExecutor(String name, int poolSize, long maxExecuteTime, TimeUnit maxExecuteTimeUnit);
+
+  WorkerPool createSharedWorkerPool(String name, int poolSize, long maxExecuteTime, TimeUnit maxExecuteTimeUnit);
 
   void simulateKill();
 
@@ -173,6 +176,13 @@ public interface VertxInternal extends Vertx {
   AddressResolverGroup<InetSocketAddress> nettyAddressResolverGroup();
 
   BlockedThreadChecker blockedThreadChecker();
+
+  CloseFuture closeFuture();
+
+  /**
+   * @return the tracer
+   */
+  VertxTracer tracer();
 
   void addCloseHook(Closeable hook);
 

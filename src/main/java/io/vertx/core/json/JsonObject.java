@@ -14,11 +14,10 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.shareddata.Shareable;
 import io.vertx.core.shareddata.impl.ClusterSerializable;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Stream;
-import java.util.stream.StreamSupport;
 
 import static io.vertx.core.json.impl.JsonUtil.*;
 import static java.time.format.DateTimeFormatter.ISO_INSTANT;
@@ -143,6 +142,18 @@ public class JsonObject implements Iterable<Map.Entry<String, Object>>, ClusterS
     } else {
       return val.toString();
     }
+  }
+
+  /**
+   * Get the Number value with the specified key
+   *
+   * @param key the key to return the value for
+   * @return the value or null if no value for that key
+   * @throws java.lang.ClassCastException if the value is not a Number
+   */
+  public Number getNumber(String key) {
+    Objects.requireNonNull(key);
+    return (Number) map.get(key);
   }
 
   /**
@@ -334,9 +345,10 @@ public class JsonObject implements Iterable<Map.Entry<String, Object>>, ClusterS
   /**
    * Get the instant value with the specified key.
    *
-   * JSON itself has no notion of a temporal types, this extension complies to the RFC-7493, so this method assumes
-   * there is a String value with the key and it contains an ISO 8601 encoded date and time format
-   * such as "2017-04-03T10:25:41Z", which it decodes if found and returns.
+   * JSON itself has no notion of a temporal types, this extension allows ISO 8601 string formatted dates with timezone
+   * always set to zero UTC offset, as denoted by the suffix "Z" to be parsed as a instant value.
+   * {@code YYYY-MM-DDTHH:mm:ss.sssZ} is the default format used by web browser scripting. This extension complies to
+   * the RFC-7493 with all the restrictions mentioned before. The method will then decode and return a instant value.
    *
    * @param key the key to return the value for
    * @return the value or null if no value for that key
@@ -389,6 +401,22 @@ public class JsonObject implements Iterable<Map.Entry<String, Object>>, ClusterS
     Objects.requireNonNull(key);
     if (map.containsKey(key)) {
       return getString(key);
+    } else {
+      return def;
+    }
+  }
+
+  /**
+   * Like {@link #getNumber(String)} but specifying a default value to return if there is no entry.
+   *
+   * @param key the key to lookup
+   * @param def the default value to use if the entry is not present
+   * @return the value or {@code def} if no entry present
+   */
+  public Number getNumber(String key, Number def) {
+    Objects.requireNonNull(key);
+    if (map.containsKey(key)) {
+      return getNumber(key);
     } else {
       return def;
     }
@@ -720,12 +748,26 @@ public class JsonObject implements Iterable<Map.Entry<String, Object>>, ClusterS
   }
 
   /**
-   * Copy the JSON object
+   * Deep copy of this JSON object.
    *
-   * @return a copy of the object
+   * @return a copy where all elements have been copied recursively
+   * @throws IllegalStateException when a nested element cannot be copied
    */
   @Override
   public JsonObject copy() {
+    return copy(DEFAULT_CLONER);
+  }
+
+  /**
+   * Deep copy of this JSON object.
+   *
+   * <p> Unlike {@link #copy()} that can fail when an unknown element cannot be copied, this method
+   * delegates the copy of such element to the {@code cloner} function and will not fail.
+   *
+   * @param cloner a function that copies custom values not supported by the JSON implementation
+   * @return a copy where all elements have been copied recursively
+   */
+  public JsonObject copy(Function<Object, ?> cloner) {
     Map<String, Object> copiedMap;
     if (map instanceof LinkedHashMap) {
       copiedMap = new LinkedHashMap<>(map.size());
@@ -733,7 +775,7 @@ public class JsonObject implements Iterable<Map.Entry<String, Object>>, ClusterS
       copiedMap = new HashMap<>(map.size());
     }
     for (Map.Entry<String, Object> entry : map.entrySet()) {
-      Object val = checkAndCopy(entry.getValue());
+      Object val = deepCopy(entry.getValue(), cloner);
       copiedMap.put(entry.getKey(), val);
     }
     return new JsonObject(copiedMap);
@@ -742,7 +784,9 @@ public class JsonObject implements Iterable<Map.Entry<String, Object>>, ClusterS
   /**
    * Get the underlying {@code Map} as is.
    *
-   * This map may contain values that are not the types returned by the {@code JsonObject}.
+   * This map may contain values that are not the types returned by the {@code JsonObject} and
+   * with an unpredictable representation of the value, e.g you might get a JSON object
+   * as a {@link JsonObject} or as a {@link Map}.
    *
    * @return the underlying Map.
    */
@@ -751,9 +795,17 @@ public class JsonObject implements Iterable<Map.Entry<String, Object>>, ClusterS
   }
 
   /**
-   * Get a stream of the entries in the JSON object.
+   * Get a Stream over the entries in the JSON object. The values in the stream will follow
+   * the same rules as defined in {@link #getValue(String)}, respecting the JSON requirements.
    *
-   * @return a stream of the entries.
+   * To stream the raw values, use the storage object stream instead:
+   * <pre>{@code
+   *   jsonObject
+   *     .getMap()
+   *     .stream()
+   * }</pre>
+   *
+   * @return a Stream
    */
   public Stream<Map.Entry<String, Object>> stream() {
     return asStream(iterator());
@@ -874,18 +926,17 @@ public class JsonObject implements Iterable<Map.Entry<String, Object>>, ClusterS
 
   @Override
   public void writeToBuffer(Buffer buffer) {
-    String encoded = encode();
-    byte[] bytes = encoded.getBytes(StandardCharsets.UTF_8);
-    buffer.appendInt(bytes.length);
-    buffer.appendBytes(bytes);
+    Buffer buf = toBuffer();
+    buffer.appendInt(buf.length());
+    buffer.appendBuffer(buf);
   }
 
   @Override
   public int readFromBuffer(int pos, Buffer buffer) {
     int length = buffer.getInt(pos);
     int start = pos + 4;
-    String encoded = buffer.getString(start, start + length);
-    fromJson(encoded);
+    Buffer buf = buffer.getBuffer(start, start + length);
+    fromBuffer(buf);
     return pos + length + 4;
   }
 
@@ -954,10 +1005,4 @@ public class JsonObject implements Iterable<Map.Entry<String, Object>>, ClusterS
       throw new UnsupportedOperationException();
     }
   }
-
-  static <T> Stream<T> asStream(Iterator<T> sourceIterator) {
-    Iterable<T> iterable = () -> sourceIterator;
-    return StreamSupport.stream(iterable.spliterator(), false);
-  }
-
 }

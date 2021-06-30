@@ -11,9 +11,9 @@
 
 package io.vertx.test.fakemetrics;
 
-import io.vertx.core.http.HttpClientRequest;
-import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.spi.metrics.ClientMetrics;
+import io.vertx.core.spi.observability.HttpRequest;
+import io.vertx.core.spi.observability.HttpResponse;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -24,12 +24,12 @@ import static org.junit.Assert.assertNotNull;
 /**
  * @author <a href="mailto:julien@julienviet.com">Julien Viet</a>
  */
-public class EndpointMetric implements ClientMetrics<HttpClientMetric, Void, HttpClientRequest, HttpClientResponse> {
+public class EndpointMetric implements ClientMetrics<HttpClientMetric, Void, HttpRequest, HttpResponse> {
 
   public final AtomicInteger queueSize = new AtomicInteger();
   public final AtomicInteger connectionCount = new AtomicInteger();
   public final AtomicInteger requestCount = new AtomicInteger();
-  public final ConcurrentMap<HttpClientRequest, HttpClientMetric> requests = new ConcurrentHashMap<>();
+  public final ConcurrentMap<HttpRequest, HttpClientMetric> requests = new ConcurrentHashMap<>();
 
   public EndpointMetric() {
   }
@@ -46,7 +46,7 @@ public class EndpointMetric implements ClientMetrics<HttpClientMetric, Void, Htt
   }
 
   @Override
-  public HttpClientMetric requestBegin(String uri, HttpClientRequest request) {
+  public HttpClientMetric requestBegin(String uri, HttpRequest request) {
     requestCount.incrementAndGet();
     HttpClientMetric metric = new HttpClientMetric(this, request);
     requests.put(request, metric);
@@ -54,27 +54,43 @@ public class EndpointMetric implements ClientMetrics<HttpClientMetric, Void, Htt
   }
 
   @Override
-  public void requestEnd(HttpClientMetric requestMetric) {
+  public void requestEnd(HttpClientMetric requestMetric, long bytesWritten) {
+    if (requestMetric == null) {
+      FakeHttpClientMetrics.unexpectedError = new RuntimeException("Unexpected null request metric");
+      return;
+    }
     requestMetric.requestEnded.incrementAndGet();
+    requestMetric.bytesWritten.set(bytesWritten);
   }
 
   @Override
-  public void responseBegin(HttpClientMetric requestMetric, HttpClientResponse response) {
-    assertNotNull(response);
+  public void responseBegin(HttpClientMetric requestMetric, HttpResponse response) {
+    if (requestMetric == null) {
+      FakeHttpClientMetrics.unexpectedError = new RuntimeException("Unexpected null request metric");
+      return;
+    }
+    if (response == null) {
+      FakeHttpClientMetrics.unexpectedError = new RuntimeException("Unexpected null response");
+      return;
+    }
     requestMetric.responseBegin.incrementAndGet();
   }
 
   @Override
   public void requestReset(HttpClientMetric requestMetric) {
+    if (requestMetric == null) {
+      FakeHttpClientMetrics.unexpectedError = new RuntimeException("Unexpected null request metric");
+      return;
+    }
     requestCount.decrementAndGet();
     requestMetric.failed.set(true);
     requests.remove(requestMetric.request);
   }
 
   @Override
-  public void responseEnd(HttpClientMetric requestMetric, HttpClientResponse response) {
+  public void responseEnd(HttpClientMetric requestMetric, long bytesRead) {
+    requestMetric.bytesRead.set(bytesRead);
     requestCount.decrementAndGet();
     requests.remove(requestMetric.request);
   }
-
 }

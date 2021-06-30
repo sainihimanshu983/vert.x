@@ -18,30 +18,33 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.TooLongFrameException;
 import io.netty.handler.codec.http.*;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.EventExecutor;
 import io.vertx.codegen.annotations.Nullable;
 import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.*;
-import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpVersion;
-import io.vertx.core.net.impl.clientconnection.ConnectionListener;
+import io.vertx.core.impl.EventLoopContext;
 import io.vertx.core.impl.ContextInternal;
 import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
-import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.SocketAddress;
 
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
 import javax.security.cert.X509Certificate;
-import java.util.ArrayList;
+import java.security.cert.Certificate;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 
 /**
  * An HTTP/2 connection in clear text that upgraded from an HTTP/1 upgrade.
  */
 public class Http2UpgradedClientConnection implements HttpClientConnection {
+
+  private static final Object SEND_BUFFERED_MESSAGES = new Object();
 
   private static final Logger log = LoggerFactory.getLogger(Http2UpgradedClientConnection.class);
 
@@ -53,11 +56,18 @@ public class Http2UpgradedClientConnection implements HttpClientConnection {
   private Handler<GoAway> goAwayHandler;
   private Handler<Throwable> exceptionHandler;
   private Handler<Buffer> pingHandler;
+  private Handler<Void> evictionHandler;
+  private Handler<Long> concurrencyChangeHandler;
   private Handler<Http2Settings> remoteSettingsHandler;
 
   Http2UpgradedClientConnection(HttpClientImpl client, Http1xClientConnection connection) {
     this.client = client;
     this.current = connection;
+  }
+
+  @Override
+  public long concurrency() {
+    return 1L;
   }
 
   @Override
@@ -80,45 +90,55 @@ public class Http2UpgradedClientConnection implements HttpClientConnection {
     return current.metric();
   }
 
+  @Override
+  public long lastResponseReceivedTimestamp() {
+    return current.lastResponseReceivedTimestamp();
+  }
+
   /**
    * The first stream that will send the request using HTTP/1, upgrades the connection when the protocol
    * switches and receives the response with HTTP/2 frames.
    */
-  private class UpgradingStream implements HttpClientStream {
+  private static class UpgradingStream implements HttpClientStream {
 
-    private HttpClientRequestImpl request;
-    private Promise<NetSocket> netSocketPromise;
-    private Http1xClientConnection conn;
-    private HttpClientStream stream;
-    private long pendingSize = 0;
-    private List<Object> pending = new ArrayList<>();
+    private final Http1xClientConnection upgradingConnection;
+    private final HttpClientStream upgradingStream;
+    private final Http2UpgradedClientConnection upgradedConnection;
+    private HttpClientStream upgradedStream;
+    private Handler<HttpResponseHead> headHandler;
+    private Handler<Buffer> chunkHandler;
+    private Handler<MultiMap> endHandler;
+    private Handler<StreamPriority> priorityHandler;
+    private Handler<Throwable> exceptionHandler;
+    private Handler<Void> drainHandler;
+    private Handler<Void> continueHandler;
+    private Handler<HttpClientPush> pushHandler;
+    private Handler<HttpFrame> unknownFrameHandler;
+    private Handler<Void> closeHandler;
 
-    UpgradingStream(HttpClientStream stream, HttpClientRequestImpl request, Promise<NetSocket> netSocketPromise, Http1xClientConnection conn) {
-      this.conn = conn;
-      this.request = request;
-      this.netSocketPromise = netSocketPromise;
-      this.stream = stream;
+    UpgradingStream(HttpClientStream stream, Http2UpgradedClientConnection upgradedConnection, Http1xClientConnection upgradingConnection) {
+      this.upgradedConnection = upgradedConnection;
+      this.upgradingConnection = upgradingConnection;
+      this.upgradingStream = stream;
     }
 
     @Override
     public HttpClientConnection connection() {
-      return Http2UpgradedClientConnection.this;
+      return upgradedConnection;
     }
 
     /**
      * HTTP/2 clear text upgrade here.
      */
     @Override
-    public void writeHead(HttpMethod method,
-                          String uri,
-                          MultiMap headers,
-                          String authority,
+    public void writeHead(HttpRequestHead request,
                           boolean chunked,
                           ByteBuf buf,
                           boolean end,
                           StreamPriority priority,
-                          Handler<AsyncResult<Void>> listener) {
-      ChannelPipeline pipeline = conn.channel().pipeline();
+                          boolean connect,
+                          Handler<AsyncResult<Void>> handler) {
+      ChannelPipeline pipeline = upgradingConnection.channel().pipeline();
       HttpClientCodec httpCodec = pipeline.get(HttpClientCodec.class);
 
       class UpgradeRequestHandler extends ChannelInboundHandlerAdapter {
@@ -128,58 +148,103 @@ public class Http2UpgradedClientConnection implements HttpClientConnection {
           ChannelPipeline pipeline = ctx.pipeline();
           if (evt == HttpClientUpgradeHandler.UpgradeEvent.UPGRADE_SUCCESSFUL) {
             // Upgrade handler will remove itself and remove the HttpClientCodec
-            pipeline.remove(conn.channelHandlerContext().handler());
+            pipeline.remove(upgradingConnection.channelHandlerContext().handler());
           }
         }
 
         @Override
         public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-          if (msg instanceof HttpResponse) {
+          if (msg instanceof HttpResponseHead) {
             pipeline.remove(this);
-            HttpResponse resp = (HttpResponse) msg;
-            if (resp.status() != HttpResponseStatus.SWITCHING_PROTOCOLS) {
+            HttpResponseHead resp = (HttpResponseHead) msg;
+            if (resp.statusCode != HttpResponseStatus.SWITCHING_PROTOCOLS.code()) {
               // Insert the close headers to let the HTTP/1 stream close the connection
-              resp.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.CLOSE);
+              resp.headers.set(HttpHeaderNames.CONNECTION, HttpHeaderValues.CLOSE);
             }
           }
           super.channelRead(ctx, msg);
         }
       }
 
-      VertxHttp2ClientUpgradeCodec upgradeCodec = new VertxHttp2ClientUpgradeCodec(client.getOptions().getInitialSettings()) {
+      VertxHttp2ClientUpgradeCodec upgradeCodec = new VertxHttp2ClientUpgradeCodec(upgradedConnection.client.getOptions().getInitialSettings()) {
         @Override
         public void upgradeTo(ChannelHandlerContext ctx, FullHttpResponse upgradeResponse) throws Exception {
 
           // Now we need to upgrade this to an HTTP2
-          ConnectionListener<HttpClientConnection> listener = conn.listener();
-          VertxHttp2ConnectionHandler<Http2ClientConnection> handler = Http2ClientConnection.createHttp2ConnectionHandler(client, conn.metrics, listener, conn.getContext(), current.metric(), (conn, concurrency) -> {
-            conn.upgradeStream(stream.metric(), request, netSocketPromise, stream.getContext(), ar -> {
-              UpgradingStream.this.conn.closeHandler(null);
-              UpgradingStream.this.conn.exceptionHandler(null);
+          VertxHttp2ConnectionHandler<Http2ClientConnection> handler = Http2ClientConnection.createHttp2ConnectionHandler(upgradedConnection.client, upgradingConnection.metrics, (EventLoopContext) upgradingConnection.getContext(), upgradedConnection.current.metric(), conn -> {
+            conn.upgradeStream(upgradingStream.metric(), upgradingStream.getContext(), ar -> {
+              upgradingConnection.closeHandler(null);
+              upgradingConnection.exceptionHandler(null);
+              upgradingConnection.evictionHandler(null);
+              upgradingConnection.concurrencyChangeHandler(null);
               if (ar.succeeded()) {
-                HttpClientStream upgradedStream = ar.result();
-                current = conn;
-                conn.closeHandler(closeHandler);
-                conn.exceptionHandler(exceptionHandler);
-                conn.pingHandler(pingHandler);
-                conn.goAwayHandler(goAwayHandler);
-                conn.shutdownHandler(shutdownHandler);
-                conn.remoteSettingsHandler(remoteSettingsHandler);
-                listener.onConcurrencyChange(concurrency);
+                upgradedStream = ar.result();
+                upgradedStream.headHandler(headHandler);
+                upgradedStream.chunkHandler(chunkHandler);
+                upgradedStream.endHandler(endHandler);
+                upgradedStream.priorityHandler(priorityHandler);
+                upgradedStream.exceptionHandler(exceptionHandler);
+                upgradedStream.drainHandler(drainHandler);
+                upgradedStream.continueHandler(continueHandler);
+                upgradedStream.pushHandler(pushHandler);
+                upgradedStream.unknownFrameHandler(unknownFrameHandler);
+                upgradedStream.closeHandler(closeHandler);
+                upgradingStream.headHandler(null);
+                upgradingStream.chunkHandler(null);
+                upgradingStream.endHandler(null);
+                upgradingStream.priorityHandler(null);
+                upgradingStream.exceptionHandler(null);
+                upgradingStream.drainHandler(null);
+                upgradingStream.continueHandler(null);
+                upgradingStream.pushHandler(null);
+                upgradingStream.unknownFrameHandler(null);
+                upgradingStream.closeHandler(null);
+                headHandler = null;
+                chunkHandler = null;
+                endHandler = null;
+                priorityHandler = null;
+                exceptionHandler = null;
+                drainHandler = null;
+                continueHandler = null;
+                pushHandler = null;
+                closeHandler = null;
+                upgradedConnection.current = conn;
+                conn.closeHandler(upgradedConnection.closeHandler);
+                conn.exceptionHandler(upgradedConnection.exceptionHandler);
+                conn.pingHandler(upgradedConnection.pingHandler);
+                conn.goAwayHandler(upgradedConnection.goAwayHandler);
+                conn.shutdownHandler(upgradedConnection.shutdownHandler);
+                conn.remoteSettingsHandler(upgradedConnection.remoteSettingsHandler);
+                conn.evictionHandler(upgradedConnection.evictionHandler);
+                conn.concurrencyChangeHandler(upgradedConnection.concurrencyChangeHandler);
+                Handler<Long> concurrencyChangeHandler = upgradedConnection.concurrencyChangeHandler;
+                upgradedConnection.closeHandler = null;
+                upgradedConnection.exceptionHandler = null;
+                upgradedConnection.pingHandler = null;
+                upgradedConnection.goAwayHandler = null;
+                upgradedConnection.shutdownHandler = null;
+                upgradedConnection.remoteSettingsHandler = null;
+                upgradedConnection.evictionHandler = null;
+                upgradedConnection.concurrencyChangeHandler = null;
+                concurrencyChangeHandler.handle(conn.concurrency());
               } else {
                 // Handle me
                 log.error(ar.cause().getMessage(), ar.cause());
               }
             });
           });
-          conn.channel().pipeline().addLast(handler);
+          upgradingConnection.channel().pipeline().addLast(handler);
           handler.clientUpgrade(ctx);
         }
       };
       HttpClientUpgradeHandler upgradeHandler = new HttpClientUpgradeHandler(httpCodec, upgradeCodec, 65536) {
+
+        private long bufferedSize = 0;
+        private Deque<Object> buffered = new ArrayDeque<>();
+
         @Override
         public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-          if (pending != null) {
+          if (buffered != null) {
             // Buffer all messages received from the server until the HTTP request is fully sent.
             //
             // Explanation:
@@ -199,58 +264,71 @@ public class Http2UpgradedClientConnection implements HttpClientConnection {
             // Therefore we must buffer all pending messages until the request is fully sent.
 
             int maxContent = maxContentLength();
-            boolean lower = pendingSize < maxContent;
+            boolean lower = bufferedSize < maxContent;
             if (msg instanceof ByteBufHolder) {
-              pendingSize += ((ByteBufHolder)msg).content().readableBytes();
+              bufferedSize += ((ByteBufHolder)msg).content().readableBytes();
             } else if (msg instanceof ByteBuf) {
-              pendingSize += ((ByteBuf)msg).readableBytes();
+              bufferedSize += ((ByteBuf)msg).readableBytes();
             }
+            buffered.add(msg);
 
-            if (pendingSize >= maxContent) {
-              if (lower) {
-                pending.clear();
-                ctx.fireExceptionCaught(new TooLongFrameException("Max content exceeded " + maxContentLength() + " bytes."));
-              }
-              return;
+            if (bufferedSize >= maxContent && lower) {
+              ctx.fireExceptionCaught(new TooLongFrameException("Max content exceeded " + maxContentLength() + " bytes."));
             }
-            pending.add(msg);
           } else {
             super.channelRead(ctx, msg);
           }
         }
+
+        @Override
+        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+          if (SEND_BUFFERED_MESSAGES == evt) {
+            Deque<Object> messages = buffered;
+            buffered = null;
+            Object msg;
+            while ((msg = messages.poll()) != null) {
+              super.channelRead(ctx, msg);
+            }
+          } else {
+            super.userEventTriggered(ctx, evt);
+          }
+        }
+
+        @Override
+        public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
+          if (buffered != null) {
+            Deque<Object> messages = buffered;
+            buffered = null;
+            Object msg;
+            while ((msg = messages.poll()) != null) {
+              ReferenceCountUtil.release(msg);
+            }
+          }
+          super.handlerRemoved(ctx);
+        }
+
       };
       pipeline.addAfter("codec", null, new UpgradeRequestHandler());
       pipeline.addAfter("codec", null, upgradeHandler);
-      doWriteHead(method, uri, headers, authority, chunked, buf, end, priority, listener);
+      doWriteHead(request, chunked, buf, end, priority, connect, handler);
     }
 
-    private void doWriteHead(HttpMethod method,
-                             String uri,
-                             MultiMap headers,
-                             String authority,
+    private void doWriteHead(HttpRequestHead head,
                              boolean chunked,
                              ByteBuf buf,
                              boolean end,
                              StreamPriority priority,
-                             Handler<AsyncResult<Void>> listener) {
-      EventExecutor exec = conn.channelHandlerContext().executor();
+                             boolean connect,
+                             Handler<AsyncResult<Void>> handler) {
+      EventExecutor exec = upgradingConnection.channelHandlerContext().executor();
       if (exec.inEventLoop()) {
-        stream.writeHead(method, uri, headers, authority, chunked, buf, end, priority, listener);
+        upgradingStream.writeHead(head, chunked, buf, end, priority, connect, handler);
         if (end) {
-          end();
+          ChannelPipeline pipeline = upgradingConnection.channelHandlerContext().pipeline();
+          pipeline.fireUserEventTriggered(SEND_BUFFERED_MESSAGES);
         }
       } else {
-        exec.execute(() -> doWriteHead(method, uri, headers, authority, chunked, buf, end, priority, listener));
-      }
-    }
-
-    private void end() {
-      // Deliver pending messages to the handler
-      List<Object> messages = pending;
-      pending = null;
-      ChannelHandlerContext context = conn.channelHandlerContext().pipeline().context("codec");
-      for (Object msg : messages) {
-        context.fireChannelRead(msg);
+        exec.execute(() -> doWriteHead(head, chunked, buf, end, priority, connect, handler));
       }
     }
 
@@ -261,26 +339,131 @@ public class Http2UpgradedClientConnection implements HttpClientConnection {
 
     @Override
     public Object metric() {
-      return stream.metric();
+      return upgradingStream.metric();
     }
 
     @Override
     public HttpVersion version() {
-      return HttpVersion.HTTP_2;
+      HttpClientStream s = upgradedStream;
+      if (s == null) {
+        s = upgradingStream;
+      }
+      return s.version();
     }
 
     @Override
     public ContextInternal getContext() {
-      return stream.getContext();
+      return upgradingStream.getContext();
+    }
+
+    @Override
+    public void continueHandler(Handler<Void> handler) {
+      if (upgradedStream != null) {
+        upgradedStream.continueHandler(handler);
+      } else {
+        upgradingStream.continueHandler(handler);
+        continueHandler = handler;
+      }
+    }
+
+    @Override
+    public void pushHandler(Handler<HttpClientPush> handler) {
+      if (pushHandler != null) {
+        upgradedStream.pushHandler(handler);
+      } else {
+        upgradingStream.pushHandler(handler);
+        pushHandler = handler;
+      }
+    }
+
+    @Override
+    public void closeHandler(Handler<Void> handler) {
+      if (closeHandler != null) {
+        upgradedStream.closeHandler(handler);
+      } else {
+        upgradingStream.closeHandler(handler);
+        closeHandler = handler;
+      }
+    }
+
+    @Override
+    public void drainHandler(Handler<Void> handler) {
+      if (upgradedStream != null) {
+        upgradedStream.drainHandler(handler);
+      } else {
+        upgradingStream.drainHandler(handler);
+        drainHandler = handler;
+      }
+    }
+
+    @Override
+    public void exceptionHandler(Handler<Throwable> handler) {
+      if (upgradedStream != null) {
+        upgradedStream.exceptionHandler(handler);
+      } else {
+        upgradingStream.exceptionHandler(handler);
+        exceptionHandler = handler;
+      }
+    }
+
+    @Override
+    public void headHandler(Handler<HttpResponseHead> handler) {
+      if (upgradedStream != null) {
+        upgradedStream.headHandler(handler);
+      } else {
+        upgradingStream.headHandler(handler);
+        headHandler = handler;
+      }
+    }
+
+    @Override
+    public void chunkHandler(Handler<Buffer> handler) {
+      if (upgradedStream != null) {
+        upgradedStream.chunkHandler(handler);
+      } else {
+        upgradingStream.chunkHandler(handler);
+        chunkHandler = handler;
+      }
+    }
+
+    @Override
+    public void endHandler(Handler<MultiMap> handler) {
+      if (upgradedStream != null) {
+        upgradedStream.endHandler(handler);
+      } else {
+        upgradingStream.endHandler(handler);
+        endHandler = handler;
+      }
+    }
+
+    @Override
+    public void unknownFrameHandler(Handler<HttpFrame> handler) {
+      if (upgradedStream != null) {
+        upgradedStream.unknownFrameHandler(handler);
+      } else {
+        upgradingStream.unknownFrameHandler(handler);
+        unknownFrameHandler = handler;
+      }
+    }
+
+    @Override
+    public void priorityHandler(Handler<StreamPriority> handler) {
+      if (upgradedStream != null) {
+        upgradedStream.priorityHandler(handler);
+      } else {
+        upgradingStream.priorityHandler(handler);
+        priorityHandler = handler;
+      }
     }
 
     @Override
     public void writeBuffer(ByteBuf buf, boolean end, Handler<AsyncResult<Void>> handler) {
-      EventExecutor exec = conn.channelHandlerContext().executor();
+      EventExecutor exec = upgradingConnection.channelHandlerContext().executor();
       if (exec.inEventLoop()) {
-        stream.writeBuffer(buf, end, handler);
+        upgradingStream.writeBuffer(buf, end, handler);
         if (end) {
-          end();
+          ChannelPipeline pipeline = upgradingConnection.channelHandlerContext().pipeline();
+          pipeline.fireUserEventTriggered(SEND_BUFFERED_MESSAGES);
         }
       } else {
         exec.execute(() -> writeBuffer(buf, end, handler));
@@ -289,79 +472,65 @@ public class Http2UpgradedClientConnection implements HttpClientConnection {
 
     @Override
     public void writeFrame(int type, int flags, ByteBuf payload) {
-      stream.writeFrame(type, flags, payload);
+      upgradingStream.writeFrame(type, flags, payload);
     }
 
     @Override
     public void doSetWriteQueueMaxSize(int size) {
-      stream.doSetWriteQueueMaxSize(size);
+      upgradingStream.doSetWriteQueueMaxSize(size);
     }
 
     @Override
     public boolean isNotWritable() {
-      return stream.isNotWritable();
+      return upgradingStream.isNotWritable();
     }
 
     @Override
     public void doPause() {
-      stream.doPause();
+      upgradingStream.doPause();
     }
 
     @Override
     public void doFetch(long amount) {
-      stream.doFetch(amount);
+      upgradingStream.doFetch(amount);
     }
 
     @Override
     public void reset(Throwable cause) {
-      stream.reset(cause);
+      upgradingStream.reset(cause);
     }
 
     @Override
     public StreamPriority priority() {
-      return stream.priority();
+      return upgradingStream.priority();
     }
 
     @Override
     public void updatePriority(StreamPriority streamPriority) {
-      stream.updatePriority(streamPriority);
+      upgradingStream.updatePriority(streamPriority);
     }
   }
 
   @Override
-  public void createStream(ContextInternal context, HttpClientRequestImpl req, Promise<NetSocket> netSocketPromise, Handler<AsyncResult<HttpClientStream>> handler) {
+  public void createStream(ContextInternal context, Handler<AsyncResult<HttpClientStream>> handler) {
     if (current instanceof Http1xClientConnection) {
-      current.createStream(context, req, netSocketPromise, ar -> {
+      current.createStream(context, ar -> {
         if (ar.succeeded()) {
           HttpClientStream stream = ar.result();
-          UpgradingStream upgradingStream = new UpgradingStream(stream, req, netSocketPromise, (Http1xClientConnection) current);
+          UpgradingStream upgradingStream = new UpgradingStream(stream, this, (Http1xClientConnection) current);
           handler.handle(Future.succeededFuture(upgradingStream));
         } else {
           handler.handle(ar);
         }
       });
     } else {
-      current.createStream(context, req, netSocketPromise, handler);
+      current.createStream(context, handler);
     }
   }
 
   @Override
   public ContextInternal getContext() {
     return current.getContext();
-  }
-
-  @Override
-  public HttpConnection closeHandler(Handler<Void> handler) {
-    closeHandler = handler;
-    current.closeHandler(handler);
-    return this;
-  }
-
-  @Override
-  public HttpConnection exceptionHandler(Handler<Throwable> handler) {
-    exceptionHandler = handler;
-    current.exceptionHandler(handler);
-    return this;
   }
 
   @Override
@@ -401,6 +570,42 @@ public class Http2UpgradedClientConnection implements HttpClientConnection {
     } else {
       current.shutdownHandler(handler);
     }
+    return this;
+  }
+
+  @Override
+  public HttpConnection closeHandler(Handler<Void> handler) {
+    if (current instanceof Http1xClientConnection) {
+      closeHandler = handler;
+    }
+    current.closeHandler(handler);
+    return this;
+  }
+
+  @Override
+  public HttpConnection exceptionHandler(Handler<Throwable> handler) {
+    if (current instanceof Http1xClientConnection) {
+      exceptionHandler = handler;
+    }
+    current.exceptionHandler(handler);
+    return this;
+  }
+
+  @Override
+  public HttpClientConnection evictionHandler(Handler<Void> handler) {
+    if (current instanceof Http1xClientConnection) {
+      evictionHandler = handler;
+    }
+    current.evictionHandler(handler);
+    return this;
+  }
+
+  @Override
+  public HttpClientConnection concurrencyChangeHandler(Handler<Long> handler) {
+    if (current instanceof Http1xClientConnection) {
+      concurrencyChangeHandler = handler;
+    }
+    current.concurrencyChangeHandler(handler);
     return this;
   }
 
@@ -472,6 +677,11 @@ public class Http2UpgradedClientConnection implements HttpClientConnection {
   @Override
   public X509Certificate[] peerCertificateChain() throws SSLPeerUnverifiedException {
     return current.peerCertificateChain();
+  }
+
+  @Override
+  public List<Certificate> peerCertificates() throws SSLPeerUnverifiedException {
+    return current.peerCertificates();
   }
 
   @Override

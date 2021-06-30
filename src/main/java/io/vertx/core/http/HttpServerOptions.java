@@ -17,6 +17,7 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.impl.Arguments;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.net.*;
+import io.vertx.core.tracing.TracingPolicy;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -69,6 +70,11 @@ public class HttpServerOptions extends NetServerOptions {
    * Default max length of all headers = 8192
    */
   public static final int DEFAULT_MAX_HEADER_SIZE = 8192;
+
+  /**
+   * Default max length of all headers = 2048
+   */
+  public static final int DEFAULT_MAX_FORM_ATTRIBUTE_SIZE = 2048;
 
   /**
    * Default value of whether 100-Continue should be handled automatically = {@code false}
@@ -130,6 +136,16 @@ public class HttpServerOptions extends NetServerOptions {
    */
   public static final boolean DEFAULT_WEBSOCKET_PREFERRED_CLIENT_NO_CONTEXT = false;
 
+  /**
+   * Default WebSocket closing timeout = 10 second)
+   */
+  public static final int DEFAULT_WEBSOCKET_CLOSING_TIMEOUT = 10;
+
+  /**
+   * Default tracing control = {@link TracingPolicy#ALWAYS}
+   */
+  public static final TracingPolicy DEFAULT_TRACING_POLICY = TracingPolicy.ALWAYS;
+
   private boolean compressionSupported;
   private int compressionLevel;
   private int maxWebSocketFrameSize;
@@ -139,6 +155,7 @@ public class HttpServerOptions extends NetServerOptions {
   private int maxChunkSize;
   private int maxInitialLineLength;
   private int maxHeaderSize;
+  private int maxFormAttributeSize;
   private Http2Settings initialSettings;
   private List<HttpVersion> alpnVersions;
   private int http2ConnectionWindowSize;
@@ -150,6 +167,8 @@ public class HttpServerOptions extends NetServerOptions {
   private int webSocketCompressionLevel;
   private boolean webSocketAllowServerNoContext;
   private boolean webSocketPreferredClientNoContext;
+  private int webSocketClosingTimeout;
+  private TracingPolicy tracingPolicy;
 
   /**
    * Default constructor
@@ -176,6 +195,7 @@ public class HttpServerOptions extends NetServerOptions {
     this.maxChunkSize = other.getMaxChunkSize();
     this.maxInitialLineLength = other.getMaxInitialLineLength();
     this.maxHeaderSize = other.getMaxHeaderSize();
+    this.maxFormAttributeSize = other.getMaxFormAttributeSize();
     this.initialSettings = other.initialSettings != null ? new Http2Settings(other.initialSettings) : null;
     this.alpnVersions = other.alpnVersions != null ? new ArrayList<>(other.alpnVersions) : null;
     this.http2ConnectionWindowSize = other.http2ConnectionWindowSize;
@@ -187,6 +207,8 @@ public class HttpServerOptions extends NetServerOptions {
     this.webSocketCompressionLevel = other.webSocketCompressionLevel;
     this.webSocketPreferredClientNoContext = other.webSocketPreferredClientNoContext;
     this.webSocketAllowServerNoContext = other.webSocketAllowServerNoContext;
+    this.webSocketClosingTimeout = other.webSocketClosingTimeout;
+    this.tracingPolicy = other.tracingPolicy;
   }
 
   /**
@@ -221,6 +243,7 @@ public class HttpServerOptions extends NetServerOptions {
     maxChunkSize = DEFAULT_MAX_CHUNK_SIZE;
     maxInitialLineLength = DEFAULT_MAX_INITIAL_LINE_LENGTH;
     maxHeaderSize = DEFAULT_MAX_HEADER_SIZE;
+    maxFormAttributeSize = DEFAULT_MAX_FORM_ATTRIBUTE_SIZE;
     initialSettings = new Http2Settings().setMaxConcurrentStreams(DEFAULT_INITIAL_SETTINGS_MAX_CONCURRENT_STREAMS);
     alpnVersions = new ArrayList<>(DEFAULT_ALPN_VERSIONS);
     http2ConnectionWindowSize = DEFAULT_HTTP2_CONNECTION_WINDOW_SIZE;
@@ -232,6 +255,8 @@ public class HttpServerOptions extends NetServerOptions {
     webSocketCompressionLevel = DEFAULT_WEBSOCKET_COMPRESSION_LEVEL;
     webSocketPreferredClientNoContext = DEFAULT_WEBSOCKET_PREFERRED_CLIENT_NO_CONTEXT;
     webSocketAllowServerNoContext = DEFAULT_WEBSOCKET_ALLOW_SERVER_NO_CONTEXT;
+    webSocketClosingTimeout = DEFAULT_WEBSOCKET_CLOSING_TIMEOUT;
+    tracingPolicy = DEFAULT_TRACING_POLICY;
   }
 
   @Override
@@ -663,6 +688,24 @@ public class HttpServerOptions extends NetServerOptions {
   }
 
   /**
+   * @return Returns the maximum size of a form attribute
+   */
+  public int getMaxFormAttributeSize() {
+    return maxFormAttributeSize;
+  }
+
+  /**
+   * Set the maximum size of a form attribute. Set to {@code -1} to allow unlimited length
+   *
+   * @param maxSize the new maximum size
+   * @return a reference to this, so the API can be used fluently
+   */
+  public HttpServerOptions setMaxFormAttributeSize(int maxSize) {
+    this.maxFormAttributeSize = maxSize;
+    return this;
+  }
+
+  /**
    * @return the initial HTTP/2 connection settings
    */
   public Http2Settings getInitialSettings() {
@@ -875,5 +918,51 @@ public class HttpServerOptions extends NetServerOptions {
    */
   public boolean getWebSocketPreferredClientNoContext() {
     return this.webSocketPreferredClientNoContext;
+  }
+
+  /**
+   * @return the amount of time (in seconds) a client WebSocket will wait until it closes TCP connection after receiving a close frame
+   */
+  public int getWebSocketClosingTimeout() {
+    return webSocketClosingTimeout;
+  }
+
+  /**
+   * Set the amount of time a server WebSocket will wait until it closes the TCP connection
+   * after sending a close frame.
+   *
+   * <p> When a server closes a WebSocket, it should wait the client close frame to close the TCP connection.
+   * This timeout will close the TCP connection on the server when it expires. When the TCP
+   * connection is closed receiving the close frame, the {@link WebSocket#exceptionHandler} instead
+   * of the {@link WebSocket#endHandler} will be called.
+   *
+   * <p> Set to {@code 0L} closes the TCP connection immediately after sending the close frame.
+   *
+   * <p> Set to a negative value to disable it.
+   *
+   * @param webSocketClosingTimeout the timeout is seconds
+   * @return a reference to this, so the API can be used fluently
+   */
+  public HttpServerOptions setWebSocketClosingTimeout(int webSocketClosingTimeout) {
+    this.webSocketClosingTimeout = webSocketClosingTimeout;
+    return this;
+  }
+
+  /**
+   * @return the tracing policy
+   */
+  public TracingPolicy getTracingPolicy() {
+    return tracingPolicy;
+  }
+
+  /**
+   * Set the tracing policy for the server behavior when Vert.x has tracing enabled.
+   *
+   * @param tracingPolicy the tracing policy
+   * @return a reference to this, so the API can be used fluently
+   */
+  public HttpServerOptions setTracingPolicy(TracingPolicy tracingPolicy) {
+    this.tracingPolicy = tracingPolicy;
+    return this;
   }
 }

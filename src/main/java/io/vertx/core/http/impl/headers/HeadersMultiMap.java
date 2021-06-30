@@ -21,6 +21,7 @@ import io.vertx.core.MultiMap;
 import io.vertx.core.http.impl.HttpUtils;
 
 import java.util.AbstractMap;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -42,6 +43,20 @@ import static io.netty.util.AsciiString.*;
  * @author <a href="mailto:julien@julienviet.com">Julien Viet</a>
  */
 public final class HeadersMultiMap extends HttpHeaders implements MultiMap {
+
+  /**
+   * Convert the {@code value} to a non null {@code CharSequence}
+   * @param value the value
+   * @return the char sequence
+   */
+  private static CharSequence toValidCharSequence(Object value) {
+    if (value instanceof CharSequence) {
+      return (CharSequence) value;
+    } else {
+      // Throws NPE
+      return value.toString();
+    }
+  }
 
   static final BiConsumer<CharSequence, CharSequence> HTTP_VALIDATOR;
 
@@ -106,12 +121,12 @@ public final class HeadersMultiMap extends HttpHeaders implements MultiMap {
 
   @Override
   public HeadersMultiMap add(CharSequence name, Object value) {
-    return add(name, (CharSequence)value);
+    return add(name, toValidCharSequence(value));
   }
 
   @Override
   public HttpHeaders add(String name, Object value) {
-    return add((CharSequence) name, (CharSequence) value);
+    return add((CharSequence) name, toValidCharSequence(value));
   }
 
   @Override
@@ -124,7 +139,7 @@ public final class HeadersMultiMap extends HttpHeaders implements MultiMap {
     int h = AsciiString.hashCode(name);
     int i = h & 0x0000000F;
     for (Object vstr: values) {
-      add0(h, i, name, (CharSequence) vstr);
+      add0(h, i, name, toValidCharSequence(vstr));
     }
     return this;
   }
@@ -177,12 +192,12 @@ public final class HeadersMultiMap extends HttpHeaders implements MultiMap {
 
   @Override
   public HeadersMultiMap set(String name, Object value) {
-    return set((CharSequence)name, (CharSequence) value);
+    return set((CharSequence)name, toValidCharSequence(value));
   }
 
   @Override
   public HeadersMultiMap set(CharSequence name, Object value) {
-    return set(name, (CharSequence)value);
+    return set(name, toValidCharSequence(value));
   }
 
   @Override
@@ -197,7 +212,7 @@ public final class HeadersMultiMap extends HttpHeaders implements MultiMap {
       if (v == null) {
         break;
       }
-      add0(h, i, name, (CharSequence) v);
+      add0(h, i, name, toValidCharSequence(v));
     }
 
     return this;
@@ -346,9 +361,7 @@ public final class HeadersMultiMap extends HttpHeaders implements MultiMap {
 
   @Override
   public HeadersMultiMap clear() {
-    for (int i = 0; i < entries.length; i ++) {
-      entries[i] = null;
-    }
+    Arrays.fill(entries, null);
     head.before = head.after = head;
     return this;
   }

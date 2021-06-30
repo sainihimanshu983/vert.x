@@ -2,6 +2,7 @@ package io.vertx.core.dns;
 
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.json.JsonArray;
+import io.vertx.core.json.impl.JsonUtil;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 
@@ -37,7 +38,7 @@ public class AddressResolverOptionsConverter {
           break;
         case "hostsValue":
           if (member.getValue() instanceof String) {
-            obj.setHostsValue(io.vertx.core.buffer.Buffer.buffer(java.util.Base64.getDecoder().decode((String)member.getValue())));
+            obj.setHostsValue(io.vertx.core.buffer.Buffer.buffer(JsonUtil.BASE64_DECODER.decode((String)member.getValue())));
           }
           break;
         case "maxQueries":
@@ -68,6 +69,11 @@ public class AddressResolverOptionsConverter {
         case "rotateServers":
           if (member.getValue() instanceof Boolean) {
             obj.setRotateServers((Boolean)member.getValue());
+          }
+          break;
+        case "roundRobinInetAddress":
+          if (member.getValue() instanceof Boolean) {
+            obj.setRoundRobinInetAddress((Boolean)member.getValue());
           }
           break;
         case "searchDomains":
@@ -106,7 +112,7 @@ public class AddressResolverOptionsConverter {
       json.put("hostsPath", obj.getHostsPath());
     }
     if (obj.getHostsValue() != null) {
-      json.put("hostsValue", java.util.Base64.getEncoder().encodeToString(obj.getHostsValue().getBytes()));
+      json.put("hostsValue", JsonUtil.BASE64_ENCODER.encodeToString(obj.getHostsValue().getBytes()));
     }
     json.put("maxQueries", obj.getMaxQueries());
     json.put("ndots", obj.getNdots());
@@ -114,6 +120,7 @@ public class AddressResolverOptionsConverter {
     json.put("queryTimeout", obj.getQueryTimeout());
     json.put("rdFlag", obj.getRdFlag());
     json.put("rotateServers", obj.isRotateServers());
+    json.put("roundRobinInetAddress", obj.isRoundRobinInetAddress());
     if (obj.getSearchDomains() != null) {
       JsonArray array = new JsonArray();
       obj.getSearchDomains().forEach(item -> array.add(item));

@@ -56,10 +56,9 @@ abstract class ContextImpl extends AbstractContext {
   static final boolean DISABLE_TIMINGS = Boolean.getBoolean(DISABLE_TIMINGS_PROP_NAME);
 
   protected final VertxInternal owner;
-  protected final VertxTracer<?, ?> tracer;
   protected final JsonObject config;
   private final Deployment deployment;
-  private final CloseHooks closeHooks;
+  private final CloseFuture closeFuture;
   private final ClassLoader tccl;
   private final EventLoop eventLoop;
   private ConcurrentMap<Object, Object> data;
@@ -71,24 +70,22 @@ abstract class ContextImpl extends AbstractContext {
   final TaskQueue orderedTasks;
 
   ContextImpl(VertxInternal vertx,
-              VertxTracer<?, ?> tracer,
               EventLoop eventLoop,
               WorkerPool internalBlockingPool,
               WorkerPool workerPool,
               Deployment deployment,
-              CloseHooks closeHooks,
+              CloseFuture closeFuture,
               ClassLoader tccl) {
     if (VertxThread.DISABLE_TCCL && tccl != ClassLoader.getSystemClassLoader()) {
       log.warn("You have disabled TCCL checks but you have a custom TCCL to set.");
     }
-    this.tracer = tracer;
     this.deployment = deployment;
     this.config = deployment != null ? deployment.config() : new JsonObject();
     this.eventLoop = eventLoop;
     this.tccl = tccl;
     this.owner = vertx;
     this.workerPool = workerPool;
-    this.closeHooks = closeHooks;
+    this.closeFuture = closeFuture;
     this.internalBlockingPool = internalBlockingPool;
     this.orderedTasks = new TaskQueue();
     this.internalOrderedTasks = new TaskQueue();
@@ -99,29 +96,13 @@ abstract class ContextImpl extends AbstractContext {
   }
 
   @Override
-  public CloseHooks closeHooks() {
-    return closeHooks;
-  }
-
-  public void addCloseHook(Closeable hook) {
-    if (closeHooks != null) {
-      closeHooks.add(hook);
-    } else {
-      owner.addCloseHook(hook);
-    }
+  public CloseFuture closeFuture() {
+    return closeFuture;
   }
 
   @Override
   public boolean isDeployment() {
     return deployment != null;
-  }
-
-  public void removeCloseHook(Closeable hook) {
-    if (deployment != null) {
-      closeHooks.remove(hook);
-    } else {
-      owner.removeCloseHook(hook);
-    }
   }
 
   @Override
@@ -174,7 +155,7 @@ abstract class ContextImpl extends AbstractContext {
         if (metrics != null) {
           execMetric = metrics.begin(queueMetric);
         }
-        context.emit(promise, f -> {
+        context.dispatch(promise, f -> {
           try {
             blockingCodeHandler.handle(promise);
           } catch (Throwable e) {
@@ -203,12 +184,17 @@ abstract class ContextImpl extends AbstractContext {
 
   @Override
   public VertxTracer tracer() {
-    return tracer;
+    return owner.tracer();
   }
 
   @Override
   public ClassLoader classLoader() {
     return tccl;
+  }
+
+  @Override
+  public WorkerPool workerPool() {
+    return workerPool;
   }
 
   @Override
@@ -263,99 +249,36 @@ abstract class ContextImpl extends AbstractContext {
     return deployment.deploymentOptions().getInstances();
   }
 
-  static abstract class Duplicated<C extends ContextImpl> extends AbstractContext {
+  @Override
+  public final void runOnContext(Handler<Void> action) {
+    runOnContext(this, action);
+  }
 
-    protected final C delegate;
-    private ConcurrentMap<Object, Object> localData;
+  abstract void runOnContext(AbstractContext ctx, Handler<Void> action);
 
-    Duplicated(C delegate) {
-      this.delegate = delegate;
-    }
+  @Override
+  public void execute(Runnable task) {
+    execute(this, task);
+  }
 
-    @Override
-    public boolean isDeployment() {
-      return delegate.isDeployment();
-    }
+  abstract <T> void execute(AbstractContext ctx, Runnable task);
 
-    @Override
-    public VertxTracer tracer() {
-      return delegate.tracer();
-    }
+  @Override
+  public final <T> void execute(T argument, Handler<T> task) {
+    execute(this, argument, task);
+  }
 
-    @Override
-    public final String deploymentID() {
-      return delegate.deploymentID();
-    }
+  abstract <T> void execute(AbstractContext ctx, T argument, Handler<T> task);
 
-    @Override
-    public final JsonObject config() {
-      return delegate.config();
-    }
+  @Override
+  public <T> void emit(T argument, Handler<T> task) {
+    emit(this, argument, task);
+  }
 
-    @Override
-    public final int getInstanceCount() {
-      return delegate.getInstanceCount();
-    }
+  abstract <T> void emit(AbstractContext ctx, T argument, Handler<T> task);
 
-    @Override
-    public final Context exceptionHandler(Handler<Throwable> handler) {
-      delegate.exceptionHandler(handler);
-      return this;
-    }
-
-    @Override
-    public final Handler<Throwable> exceptionHandler() {
-      return delegate.exceptionHandler();
-    }
-
-    @Override
-    public final void addCloseHook(Closeable hook) {
-      delegate.addCloseHook(hook);
-    }
-
-    @Override
-    public final void removeCloseHook(Closeable hook) {
-      delegate.removeCloseHook(hook);
-    }
-
-    @Override
-    public final EventLoop nettyEventLoop() {
-      return delegate.nettyEventLoop();
-    }
-
-    @Override
-    public final Deployment getDeployment() {
-      return delegate.getDeployment();
-    }
-
-    @Override
-    public final VertxInternal owner() {
-      return delegate.owner();
-    }
-
-    @Override
-    public final ClassLoader classLoader() {
-      return delegate.classLoader();
-    }
-
-    @Override
-    public final void reportException(Throwable t) {
-      delegate.reportException(t);
-    }
-
-    @Override
-    public final ConcurrentMap<Object, Object> contextData() {
-      return delegate.contextData();
-    }
-
-    @Override
-    public final ConcurrentMap<Object, Object> localContextData() {
-      synchronized (this) {
-        if (localData == null) {
-          localData = new ConcurrentHashMap<>();
-        }
-        return localData;
-      }
-    }
+  @Override
+  public final ContextInternal duplicate() {
+    return new DuplicatedContext(this);
   }
 }

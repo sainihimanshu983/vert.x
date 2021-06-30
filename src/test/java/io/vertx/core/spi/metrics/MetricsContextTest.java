@@ -23,11 +23,14 @@ import io.vertx.core.metrics.MetricsOptions;
 import io.vertx.core.metrics.impl.DummyVertxMetrics;
 import io.vertx.core.net.*;
 import io.vertx.core.spi.VertxMetricsFactory;
+import io.vertx.core.spi.observability.HttpRequest;
+import io.vertx.core.spi.observability.HttpResponse;
 import io.vertx.test.core.VertxTestBase;
 import org.junit.Test;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -97,36 +100,30 @@ public class MetricsContextTest extends VertxTestBase {
       public HttpServerMetrics createHttpServerMetrics(HttpServerOptions options, SocketAddress localAddress) {
         return new DummyHttpServerMetrics() {
           @Override
-          public Void requestBegin(Void socketMetric, HttpServerRequest request) {
+          public Void requestBegin(Void socketMetric, HttpRequest request) {
             requestBeginCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
             return null;
           }
           @Override
-          public void responseEnd(Void requestMetric, HttpServerResponse response) {
+          public void responseEnd(Void requestMetric, HttpResponse response, long bytesWritten) {
             responseEndCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public Void connected(SocketAddress remoteAddress, String remoteName) {
             socketConnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
             return null;
           }
           @Override
           public void disconnected(Void socketMetric, SocketAddress remoteAddress) {
             socketDisconnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesRead(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesReadCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesWritten(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesWrittenCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void close() {
@@ -166,9 +163,11 @@ public class MetricsContextTest extends VertxTestBase {
         });
       });
     });
-    client.put(8080, "localhost", "/", Buffer.buffer("hello"), onSuccess(resp -> {
-      complete();
-    }));
+    client.request(HttpMethod.PUT, 8080, "localhost", "/")
+      .compose(req -> req.send(Buffer.buffer("hello"))
+        .onComplete(onSuccess(resp -> {
+          complete();
+        })));
     await();
   }
 
@@ -192,42 +191,55 @@ public class MetricsContextTest extends VertxTestBase {
     AtomicBoolean bytesReadCalled = new AtomicBoolean();
     AtomicBoolean bytesWrittenCalled = new AtomicBoolean();
     AtomicBoolean closeCalled = new AtomicBoolean();
+    AtomicInteger httpLifecycle = new AtomicInteger();
     VertxMetricsFactory factory = (options) -> new DummyVertxMetrics() {
       @Override
       public HttpServerMetrics createHttpServerMetrics(HttpServerOptions options, SocketAddress localAddress) {
         return new DummyHttpServerMetrics() {
           @Override
+          public Void requestBegin(Void socketMetric, HttpRequest request) {
+            assertEquals(0, httpLifecycle.getAndIncrement());
+            return null;
+          }
+          @Override
+          public void requestEnd(Void requestMetric, HttpRequest request, long bytesRead) {
+            assertEquals(1, httpLifecycle.getAndIncrement());
+          }
+          @Override
+          public void responseBegin(Void requestMetric, HttpResponse response) {
+            assertEquals(2, httpLifecycle.getAndIncrement());
+          }
+          @Override
+          public void responseEnd(Void requestMetric, HttpResponse response, long bytesWritten) {
+            assertEquals(3, httpLifecycle.getAndIncrement());
+          }
+          @Override
           public Void connected(Void socketMetric, Void requestMetric, ServerWebSocket serverWebSocket) {
+            assertEquals(2, httpLifecycle.get());
             webSocketConnected.set(true);
-            // FIXME
-            // assertTrue(Context.isOnEventLoopThread());
             return null;
           }
           @Override
           public void disconnected(Void serverWebSocketMetric) {
+            assertEquals(4, httpLifecycle.get());
             webSocketDisconnected.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public Void connected(SocketAddress remoteAddress, String remoteName) {
             socketConnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
             return null;
           }
           @Override
           public void disconnected(Void socketMetric, SocketAddress remoteAddress) {
             socketDisconnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesRead(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesReadCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesWritten(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesWrittenCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void close() {
@@ -299,15 +311,15 @@ public class MetricsContextTest extends VertxTestBase {
       public HttpClientMetrics createHttpClientMetrics(HttpClientOptions options) {
         return new DummyHttpClientMetrics() {
           @Override
-          public ClientMetrics<Void, Void, HttpClientRequest, HttpClientResponse> createEndpointMetrics(SocketAddress remoteAddress, int maxPoolSize) {
-            return new ClientMetrics<Void, Void, HttpClientRequest, HttpClientResponse>() {
+          public ClientMetrics<Void, Void, HttpRequest, HttpResponse> createEndpointMetrics(SocketAddress remoteAddress, int maxPoolSize) {
+            return new ClientMetrics<Void, Void, HttpRequest, HttpResponse>() {
               @Override
-              public Void requestBegin(String uri, HttpClientRequest request) {
+              public Void requestBegin(String uri, HttpRequest request) {
                 requestBeginCalled.set(uri);
                 return null;
               }
               @Override
-              public void responseEnd(Void requestMetric, HttpClientResponse response) {
+              public void responseEnd(Void requestMetric, long bytesRead) {
                 responseEndCalled.set(true);
               }
             };
@@ -315,23 +327,19 @@ public class MetricsContextTest extends VertxTestBase {
           @Override
           public Void connected(SocketAddress remoteAddress, String remoteName) {
             socketConnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
             return null;
           }
           @Override
           public void disconnected(Void socketMetric, SocketAddress remoteAddress) {
             socketDisconnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesRead(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesReadCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesWritten(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesWrittenCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void close() {
@@ -360,21 +368,22 @@ public class MetricsContextTest extends VertxTestBase {
       expectedContext.set(Vertx.currentContext());
       HttpClient client = vertx.createHttpClient();
       assertSame(expectedThread.get(), Thread.currentThread());
-      client.put(8080, "localhost", "/the-uri", Buffer.buffer("hello"), resp -> {
-        executeInVanillaThread(() -> {
-          client.close();
-          vertx.close(v2 -> {
-            assertEquals("/the-uri", requestBeginCalled.get());
-            assertTrue(responseEndCalled.get());
-            assertTrue(socketConnectedCalled.get());
-            assertTrue(socketDisconnectedCalled.get());
-            assertTrue(bytesReadCalled.get());
-            assertTrue(bytesWrittenCalled.get());
-            assertTrue(closeCalled.get());
-            testComplete();
+      client.request(HttpMethod.PUT, 8080, "localhost", "/the-uri")
+        .compose(req -> req.send(Buffer.buffer("hello")).onComplete(onSuccess(resp -> {
+          executeInVanillaThread(() -> {
+            client.close();
+            vertx.close(v2 -> {
+              assertEquals("/the-uri", requestBeginCalled.get());
+              assertTrue(responseEndCalled.get());
+              assertTrue(socketConnectedCalled.get());
+              assertTrue(socketDisconnectedCalled.get());
+              assertTrue(bytesReadCalled.get());
+              assertTrue(bytesWrittenCalled.get());
+              assertTrue(closeCalled.get());
+              testComplete();
+            });
           });
-        });
-      });
+        })));
     });
     await();
   }
@@ -403,14 +412,13 @@ public class MetricsContextTest extends VertxTestBase {
       public HttpClientMetrics createHttpClientMetrics(HttpClientOptions options) {
         return new DummyHttpClientMetrics() {
           @Override
-          public ClientMetrics<Void, Void, HttpClientRequest, HttpClientResponse> createEndpointMetrics(SocketAddress remoteAddress, int maxPoolSize) {
-            return new ClientMetrics<Void, Void, HttpClientRequest, HttpClientResponse>() {
+          public ClientMetrics<Void, Void, HttpRequest, HttpResponse> createEndpointMetrics(SocketAddress remoteAddress, int maxPoolSize) {
+            return new ClientMetrics<Void, Void, HttpRequest, HttpResponse>() {
             };
           }
           @Override
           public Void connected(WebSocket webSocket) {
             webSocketConnected.set(true);
-            assertTrue(Context.isOnEventLoopThread());
             return null;
           }
           @Override
@@ -420,23 +428,19 @@ public class MetricsContextTest extends VertxTestBase {
           @Override
           public Void connected(SocketAddress remoteAddress, String remoteName) {
             socketConnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
             return null;
           }
           @Override
           public void disconnected(Void socketMetric, SocketAddress remoteAddress) {
             socketDisconnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesRead(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesReadCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesWritten(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesWrittenCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void close() {
@@ -510,23 +514,19 @@ public class MetricsContextTest extends VertxTestBase {
           @Override
           public Void connected(SocketAddress remoteAddress, String remoteName) {
             socketConnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
             return null;
           }
           @Override
           public void disconnected(Void socketMetric, SocketAddress remoteAddress) {
             socketDisconnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesRead(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesReadCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesWritten(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesWrittenCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void close() {
@@ -599,23 +599,19 @@ public class MetricsContextTest extends VertxTestBase {
           @Override
           public Void connected(SocketAddress remoteAddress, String remoteName) {
             socketConnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
             return null;
           }
           @Override
           public void disconnected(Void socketMetric, SocketAddress remoteAddress) {
             socketDisconnectedCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesRead(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesReadCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesWritten(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesWrittenCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void close() {
@@ -687,17 +683,14 @@ public class MetricsContextTest extends VertxTestBase {
           @Override
           public void listening(String localName, SocketAddress localAddress) {
             listening.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesRead(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesReadCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void bytesWritten(Void socketMetric, SocketAddress remoteAddress, long numberOfBytes) {
             bytesWrittenCalled.set(true);
-            assertTrue(Context.isOnEventLoopThread());
           }
           @Override
           public void close() {

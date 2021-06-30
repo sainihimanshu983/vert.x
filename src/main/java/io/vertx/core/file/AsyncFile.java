@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2019 Contributors to the Eclipse Foundation
+ * Copyright (c) 2011-2021 Contributors to the Eclipse Foundation
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License 2.0 which is available at
@@ -24,9 +24,9 @@ import io.vertx.core.streams.WriteStream;
  * Represents a file on the file-system which can be read from, or written to asynchronously.
  * <p>
  * This class also implements {@link io.vertx.core.streams.ReadStream} and
- * {@link io.vertx.core.streams.WriteStream}. This allows the data to be pumped to and from
+ * {@link io.vertx.core.streams.WriteStream}. This allows the data to be piped to and from
  * other streams, e.g. an {@link io.vertx.core.http.HttpClientRequest} instance,
- * using the {@link io.vertx.core.streams.Pump} class
+ * using the {@link io.vertx.core.streams.Pipe} class
  *
  * @author <a href="http://tfox.org">Tim Fox</a>
  */
@@ -181,4 +181,26 @@ public interface AsyncFile extends ReadStream<Buffer>, WriteStream<Buffer> {
    */
   @Fluent
   AsyncFile setReadBufferSize(int readBufferSize);
+
+  /**
+   * Like {@link #size()} but blocking.
+   *
+   * @throws FileSystemException if an error occurs
+   */
+  long sizeBlocking();
+
+  /**
+   * Like {@link #size()} but the {@code handler} will be called when the operation is complete or if an error occurs.
+   */
+  default void size(Handler<AsyncResult<Long>> handler) {
+    Future<Long> future = size();
+    if (handler != null) {
+      future.onComplete(handler);
+    }
+  }
+
+  /**
+   * @return the size of the file
+   */
+  Future<Long> size();
 }

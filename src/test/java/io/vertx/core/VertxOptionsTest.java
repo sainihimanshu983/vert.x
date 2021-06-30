@@ -15,9 +15,11 @@ import io.vertx.core.file.FileSystemOptions;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.metrics.MetricsOptions;
 import io.vertx.core.spi.cluster.ClusterManager;
+import io.vertx.core.tracing.TracingOptions;
 import io.vertx.test.core.TestUtils;
 import io.vertx.test.core.VertxTestBase;
 import io.vertx.test.fakecluster.FakeClusterManager;
+import io.vertx.test.faketracer.FakeTracerFactory;
 import org.junit.Test;
 
 import java.util.Random;
@@ -91,7 +93,7 @@ public class VertxOptionsTest extends VertxTestBase {
     } catch (IllegalArgumentException e) {
       // OK
     }
-    assertEquals("localhost", options.getEventBusOptions().getHost());
+    assertNull(options.getEventBusOptions().getHost());
     String randString = TestUtils.randomUnicodeString(100);
     options.getEventBusOptions().setHost(randString);
     assertEquals(randString, options.getEventBusOptions().getHost());
@@ -249,6 +251,9 @@ public class VertxOptionsTest extends VertxTestBase {
     options.setMetricsOptions(
         new MetricsOptions().
             setEnabled(metricsEnabled));
+    options.setTracingOptions(
+        new TracingOptions().setFactory(new FakeTracerFactory())
+    );
     options.setWarningExceptionTime(warningExceptionTime);
     options.setMaxEventLoopExecuteTimeUnit(maxEventLoopExecuteTimeUnit);
     options.setMaxWorkerExecuteTimeUnit(maxWorkerExecuteTimeUnit);
@@ -274,6 +279,9 @@ public class VertxOptionsTest extends VertxTestBase {
     MetricsOptions metricsOptions = options.getMetricsOptions();
     assertNotNull(metricsOptions);
     assertEquals(metricsEnabled, metricsOptions.isEnabled());
+    TracingOptions tracingOptions = options.getTracingOptions();
+    assertNotNull(tracingOptions);
+    assertTrue(tracingOptions.getFactory() instanceof FakeTracerFactory);
     assertEquals(warningExceptionTime, options.getWarningExceptionTime());
     assertEquals(maxEventLoopExecuteTimeUnit, options.getMaxEventLoopExecuteTimeUnit());
     assertEquals(maxWorkerExecuteTimeUnit, options.getMaxWorkerExecuteTimeUnit());
@@ -318,7 +326,7 @@ public class VertxOptionsTest extends VertxTestBase {
     assertEquals(20, options.getInternalBlockingPoolSize());
     assertEquals(20, options.getWorkerPoolSize());
     assertEquals(1000, options.getBlockedThreadCheckInterval());
-    assertEquals("localhost", options.getEventBusOptions().getHost());
+    assertNull(options.getEventBusOptions().getHost());
     assertNull(options.getEventBusOptions().getClusterPublicHost());
     assertEquals(null, options.getClusterManager());
     assertEquals(2000l * 1000000, options.getMaxEventLoopExecuteTime());
@@ -386,6 +394,7 @@ public class VertxOptionsTest extends VertxTestBase {
             put("enabled", metricsEnabled).
             put("jmxEnabled", jmxEnabled).
             put("jmxDomain", jmxDomain)).
+        put("tracingOptions", new JsonObject()).
         put("maxEventLoopExecuteTimeUnit", maxEventLoopExecuteTimeUnit).
         put("maxWorkerExecuteTimeUnit", maxWorkerExecuteTimeUnit).
         put("warningExceptionTimeUnit", warningExceptionTimeUnit).
@@ -412,6 +421,7 @@ public class VertxOptionsTest extends VertxTestBase {
     assertEquals(fileResolverCachingEnabled, fileSystemOptions.isFileCachingEnabled());
     MetricsOptions metricsOptions = options.getMetricsOptions();
     assertEquals(metricsEnabled, metricsOptions.isEnabled());
+    assertNotNull(options.getTracingOptions());
     assertEquals(warningExceptionTime, options.getWarningExceptionTime());
     assertEquals(maxEventLoopExecuteTimeUnit, options.getMaxEventLoopExecuteTimeUnit());
     assertEquals(maxWorkerExecuteTimeUnit, options.getMaxWorkerExecuteTimeUnit());

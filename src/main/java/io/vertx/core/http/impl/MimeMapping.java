@@ -55,7 +55,8 @@ public class MimeMapping {
     m.put("jar", "application/java-archive");
     m.put("ser", "application/java-serialized-object");
     m.put("class", "application/java-vm");
-    m.put("js", "application/javascript");
+    m.put("js", "text/javascript");
+    m.put("mjs", "text/javascript");
     m.put("json", "application/json");
     m.put("jsonml", "application/jsonml+json");
     m.put("lostxml", "application/lost+xml");
@@ -993,6 +994,7 @@ public class MimeMapping {
     m.put("f4v", "video/x-f4v");
     m.put("fli", "video/x-fli");
     m.put("flv", "video/x-flv");
+    m.put("m4a", "audio/x-m4a");
     m.put("m4v", "video/x-m4v");
     m.put("mkv", "video/x-matroska");
     m.put("mk3d", "video/x-matroska");

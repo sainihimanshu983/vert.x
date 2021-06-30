@@ -21,6 +21,8 @@ import io.vertx.core.net.SocketAddress;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
 import javax.security.cert.X509Certificate;
+import java.security.cert.Certificate;
+import java.util.List;
 
 /**
  * Represents an HTTP connection.
@@ -160,13 +162,20 @@ public interface HttpConnection {
   HttpConnection closeHandler(Handler<Void> handler);
 
   /**
+   * Like {@link #close(Handler)} but returns a {@code Future} of the asynchronous result
+   */
+  Future<Void> close();
+
+  /**
    * Close the connection and all the currently active streams.
    * <p/>
    * An HTTP/2 connection will send a {@literal GOAWAY} frame before.
    *
-   * @return a future completed with the result
+   * @param handler the handler to be completed when the connection is closed
    */
-  Future<Void> close();
+  default void close(Handler<AsyncResult<Void>> handler) {
+    close().onComplete(handler);
+  }
 
   /**
    * @return the latest server settings acknowledged by the remote endpoint - this is not implemented for HTTP/1.x
@@ -287,9 +296,21 @@ public interface HttpConnection {
    * @throws javax.net.ssl.SSLPeerUnverifiedException SSL peer's identity has not been verified.
    * @see javax.net.ssl.SSLSession#getPeerCertificateChain()
    * @see #sslSession()
+   * @deprecated instead use {@link #peerCertificates()} or {@link #sslSession()}
    */
+  @Deprecated
   @GenIgnore
   X509Certificate[] peerCertificateChain() throws SSLPeerUnverifiedException;
+
+  /**
+   * @return an ordered list of the peer certificates. Returns null if connection is
+   *         not SSL.
+   * @throws javax.net.ssl.SSLPeerUnverifiedException SSL peer's identity has not been verified.
+   * @see javax.net.ssl.SSLSession#getPeerCertificateChain()
+   * @see #sslSession()
+   */
+  @GenIgnore()
+  List<Certificate> peerCertificates() throws SSLPeerUnverifiedException;
 
   /**
    * Returns the SNI server name presented during the SSL handshake by the client.
@@ -297,4 +318,5 @@ public interface HttpConnection {
    * @return the indicated server name
    */
   String indicatedServerName();
+
 }

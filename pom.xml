@@ -16,11 +16,11 @@
   <parent>
     <groupId>io.vertx</groupId>
     <artifactId>vertx-parent</artifactId>
-    <version>15</version>
+    <version>19</version>
   </parent>
 
   <artifactId>vertx-core</artifactId>
-  <version>4.0.0-SNAPSHOT</version>
+  <version>4.1.1-SNAPSHOT</version>
 
   <name>Vert.x Core</name>
 
@@ -44,14 +44,13 @@
   </scm>
 
   <properties>
-    <log4j.version>1.2.17</log4j.version>
     <slf4j.version>1.7.21</slf4j.version>
-    <log4j2.version>2.8.2</log4j2.version>
-    <junit.version>4.12</junit.version>
+    <log4j2.version>2.13.3</log4j2.version>
+    <junit.version>4.13.1</junit.version>
     <assertj.version>3.4.1</assertj.version>
     <apacheds-protocol-dns.version>1.5.7</apacheds-protocol-dns.version>
     <generated.dir>${project.basedir}/src/main/generated</generated.dir>
-    <stack.version>4.0.0-SNAPSHOT</stack.version>
+    <stack.version>4.1.1-SNAPSHOT</stack.version>
     <jetty.alpnAgent.argLine/>
     <jmh.version>1.19</jmh.version>
     <vertx.testNativeTransport>false</vertx.testNativeTransport>
@@ -139,12 +138,6 @@
 
     <!-- Loggers -->
     <dependency>
-      <groupId>log4j</groupId>
-      <artifactId>log4j</artifactId>
-      <version>${log4j.version}</version>
-      <scope>provided</scope>
-    </dependency>
-    <dependency>
       <groupId>org.apache.logging.log4j</groupId>
       <artifactId>log4j-api</artifactId>
       <version>${log4j2.version}</version>
@@ -228,12 +221,10 @@
             <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
             <additionalClasspathElements>
               <additionalClasspathElement>${project.build.testSourceDirectory}</additionalClasspathElement>
-              <additionalClasspathElement>${basedir}/src/test/resources/webroot2.jar</additionalClasspathElement>
-              <additionalClasspathElement>${basedir}/src/test/resources/webroot5.zip</additionalClasspathElement>
+              <additionalClasspathElement>${project.basedir}/src/test/classpath/jul</additionalClasspathElement>
             </additionalClasspathElements>
             <systemPropertyVariables>
               <!--<javax.net.debug>ssl</javax.net.debug>-->
-              <io.netty.leakDetectionLevel>PARANOID</io.netty.leakDetectionLevel>
               <buildDirectory>${project.build.directory}</buildDirectory>
               <vertx.version>${project.version}</vertx.version>
               <vertx.handle100Continue>true</vertx.handle100Continue>
@@ -320,6 +311,40 @@
                 <compileSourceRoot>src/main/java11</compileSourceRoot>
               </compileSourceRoots>
               <outputDirectory>${project.build.outputDirectory}/META-INF/versions/11/</outputDirectory>
+            </configuration>
+          </execution>
+          <execution>
+            <id>test-service-helper</id>
+            <phase>test-compile</phase>
+            <goals>
+              <goal>testCompile</goal>
+            </goals>
+            <configuration>
+              <compileSourceRoots>
+                <compileSourceRoot>src/test/classpath/servicehelper</compileSourceRoot>
+              </compileSourceRoots>
+              <outputDirectory>${project.build.directory}/classpath/servicehelper</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <artifactId>maven-resources-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>copy-service-helper</id>
+            <phase>generate-test-resources</phase>
+            <goals>
+              <goal>copy-resources</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/classpath</outputDirectory>
+              <resources>
+                <resource>
+                  <directory>src/test/classpath</directory>
+                </resource>
+              </resources>
             </configuration>
           </execution>
         </executions>
@@ -496,6 +521,23 @@
             </configuration>
           </execution>
           <execution>
+            <id>slf4j-no-impl</id>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+            <configuration>
+              <includes>
+                <include>io/vertx/it/SLF4JNoImplTest.java</include>
+              </includes>
+              <classpathDependencyExcludes>
+                <classpathDependencyExclude>org.slf4j:slf4j-simple</classpathDependencyExclude>
+                <classpathDependencyExclude>org.apache.logging.log4j:log4j-api</classpathDependencyExclude>
+                <classpathDependencyExclude>org.apache.logging.log4j:log4j-core</classpathDependencyExclude>
+              </classpathDependencyExcludes>
+            </configuration>
+          </execution>
+          <execution>
             <id>jul</id>
             <goals>
               <goal>integration-test</goal>
@@ -505,6 +547,9 @@
               <includes>
                 <include>io/vertx/it/JULLogDelegateTest.java</include>
               </includes>
+              <additionalClasspathElements>
+                <additionalClasspathElement>${project.basedir}/src/test/classpath/jul</additionalClasspathElement>
+              </additionalClasspathElements>
             </configuration>
           </execution>
           <execution>
@@ -517,6 +562,9 @@
               <includes>
                 <include>io/vertx/it/Log4J2LogDelegateTest.java</include>
               </includes>
+              <classpathDependencyExcludes>
+                <classpathDependencyExclude>org.slf4j:slf4j-simple</classpathDependencyExclude>
+              </classpathDependencyExcludes>
             </configuration>
           </execution>
           <execution>
@@ -592,7 +640,7 @@
                 <vertx-test-alpn-openssl>false</vertx-test-alpn-openssl>
               </systemProperties>
               <additionalClasspathElements>
-                <additionalClasspathElement>${project.basedir}/src/test/externals</additionalClasspathElement>
+                <additionalClasspathElement>${project.basedir}/src/test/classpath/jsoncodec</additionalClasspathElement>
               </additionalClasspathElements>
               <classpathDependencyExcludes>
                 <classpathDependencyExclude>com.fasterxml.jackson.core:jackson-core</classpathDependencyExclude>
@@ -600,7 +648,52 @@
               </classpathDependencyExcludes>
             </configuration>
           </execution>
+          <execution>
+            <id>vertx-thread-factory</id>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+            <configuration>
+              <includes>
+                <include>io/vertx/it/VertxThreadFactoryTest.java</include>
+              </includes>
+              <systemProperties>
+                <vertx-test-alpn-jdk>false</vertx-test-alpn-jdk>
+                <vertx-test-alpn-openssl>false</vertx-test-alpn-openssl>
+              </systemProperties>
+              <additionalClasspathElements>
+                <additionalClasspathElement>${project.basedir}/src/test/classpath/threadfactory</additionalClasspathElement>
+              </additionalClasspathElements>
+            </configuration>
+          </execution>
+          <execution>
+            <id>executor-service-factory</id>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+            <configuration>
+              <includes>
+                <include>io/vertx/it/ExecutorServiceFactoryTest.java</include>
+              </includes>
+              <systemProperties>
+                <vertx-test-alpn-jdk>false</vertx-test-alpn-jdk>
+                <vertx-test-alpn-openssl>false</vertx-test-alpn-openssl>
+              </systemProperties>
+              <additionalClasspathElements>
+                <additionalClasspathElement>${project.basedir}/src/test/classpath/executorservicefactory</additionalClasspathElement>
+              </additionalClasspathElements>
+            </configuration>
+          </execution>
         </executions>
+        <dependencies>
+          <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${slf4j.version}</version>
+          </dependency>
+        </dependencies>
       </plugin>
 
       <plugin>

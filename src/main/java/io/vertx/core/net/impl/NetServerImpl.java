@@ -298,25 +298,23 @@ public class NetServerImpl extends TCPServerBase implements Closeable, MetricsPr
 
     private void handleException(Throwable cause) {
       if (exceptionHandler != null) {
-        context.dispatch(v -> exceptionHandler.handle(cause));
+        context.emit(v -> exceptionHandler.handle(cause));
       }
     }
 
     private void connected(Channel ch) {
       NetServerImpl.this.initChannel(ch.pipeline());
       TCPMetrics<?> metrics = getMetrics();
-      VertxHandler<NetSocketImpl> nh = VertxHandler.create(ctx -> new NetSocketImpl(vertx, ctx, context, sslHelper, metrics));
-      nh.addHandler(conn -> {
+      VertxHandler<NetSocketImpl> handler = VertxHandler.create(ctx -> new NetSocketImpl(context, ctx, sslHelper, metrics));
+      handler.removeHandler(NetSocketImpl::unregisterEventBusHandler);
+      handler.addHandler(conn -> {
         if (metrics != null) {
           conn.metric(metrics.connected(conn.remoteAddress(), conn.remoteName()));
         }
         conn.registerEventBusHandler();
-        context.dispatch(conn, connectionHandler::handle);
+        context.emit(conn, connectionHandler::handle);
       });
-      nh.removeHandler(conn -> {
-        // Do nothing
-      });
-      ch.pipeline().addLast("handler", nh);
+      ch.pipeline().addLast("handler", handler);
     }
   }
 
